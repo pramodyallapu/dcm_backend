@@ -32,6 +32,13 @@ def _get_accessible_clients(request):
     if request.user.role in ('admin', 'supervisor'):
         return qs
 
+    if request.user.tpms_admin_id is None:
+        # Native staff: derive accessible clients from ClientStaffAssignment
+        assigned_client_ids = ClientStaffAssignment.objects.filter(
+            user=request.user, is_active=True,
+        ).values_list('client_id', flat=True)
+        return qs.filter(id__in=assigned_client_ids)
+
     # Staff: derive accessible clients from their TPMS appointment history
     from apps.legacy.models import TpmsAppointment
     employee_id = request.user.tpms_employee_id
@@ -62,6 +69,22 @@ def _get_client_or_404(request, client_id: int) -> Client:
 # Client CRUD
 # ---------------------------------------------------------------------------
 
+def _list_native_clients(request, include_inactive: bool, search: str | None) -> list[Client]:
+    """Native (non-TPMS) equivalent of list_clients — reads the local Client
+    table directly instead of live TPMS data, reusing the same staff-scoping
+    logic as _get_accessible_clients."""
+    qs = _get_accessible_clients(request)
+    if not include_inactive:
+        qs = qs.filter(status=Client.Status.ACTIVE)
+    if search:
+        qs = qs.filter(
+            Q(first_name__icontains=search)
+            | Q(last_name__icontains=search)
+            | Q(preferred_name__icontains=search)
+        )
+    return list(qs.order_by('last_name', 'first_name'))
+
+
 @router.get('', response=list[ClientSchema])
 def list_clients(request, include_inactive: bool = False, search: str | None = None):
     """
@@ -75,7 +98,7 @@ def list_clients(request, include_inactive: bool = False, search: str | None = N
     - Staff: only patients they have been explicitly assigned to.
     """
     if request.user.tpms_admin_id is None:
-        return []
+        return _list_native_clients(request, include_inactive, search)
 
     from apps.legacy.models import TpmsClient
 
@@ -249,6 +272,32 @@ def _tpms_status(raw: str | None) -> str:
     return 'scheduled'
 
 
+def _list_native_client_sessions(
+    request,
+    client: Client,
+    status: str | None,
+    from_date: date | None,
+    to_date: date | None,
+):
+    """Native (non-TPMS) equivalent of list_client_sessions — reads the local
+    Appointment table directly (tpms_client_id holds the local Client.id by
+    convention for native-mode appointments) instead of TpmsAppointment."""
+    from apps.sessions.models import Appointment as DcmAppointment
+
+    qs = DcmAppointment.objects.filter(tpms_client_id=client.id).annotate(
+        assigned_program_count=Count('lesson__lesson_programs', distinct=True),
+    )
+    if request.user.role not in ('admin', 'supervisor'):
+        qs = qs.filter(staff_id=request.user.id)
+    if status:
+        qs = qs.filter(status=status)
+    if from_date:
+        qs = qs.filter(start_time__date__gte=from_date)
+    if to_date:
+        qs = qs.filter(start_time__date__lte=to_date)
+    return list(qs.order_by('-start_time'))
+
+
 @router.get('/{client_id}/sessions', response=list[AppointmentSchema])
 def list_client_sessions(
     request,
@@ -270,7 +319,7 @@ def list_client_sessions(
     client = _get_client_or_404(request, client_id)
 
     if not client.external_id:
-        return []
+        return _list_native_client_sessions(request, client, status, from_date, to_date)
 
     tpms_client_id = int(client.external_id)
 

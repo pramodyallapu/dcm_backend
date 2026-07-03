@@ -217,8 +217,13 @@ def my_schedule(request, date: str | None = None):
     target_date = date or dt_date.today().isoformat()
 
     employee_id = request.user.tpms_employee_id
-    if not employee_id:
-        return []
+    if employee_id is None:
+        # Native (non-TPMS) staff: read straight from the local Appointment table.
+        return list(
+            _appt_qs()
+            .filter(staff_id=request.user.id, start_time__date=target_date)
+            .order_by('start_time')
+        )
 
     qs = list(
         TpmsAppointment.objects.using('therapypms').filter(

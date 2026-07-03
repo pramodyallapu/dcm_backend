@@ -62,6 +62,7 @@ class Command(BaseCommand):
                         first_name='Admin',
                         last_name=name,
                         role='admin',
+                        organization=org,
                     )
                     self.stdout.write(self.style.SUCCESS(f'  Admin user "{admin_email}" created'))
 

@@ -7,7 +7,7 @@ from ninja.errors import HttpError
 from django.db import transaction
 
 from .models import User, APIKey
-from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth
+from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, user_tenant_mismatch
 from .schemas import (
     LoginRequest,
     TokenResponse,
@@ -54,9 +54,29 @@ def _tpms_role_for_employee_type(employee_type: str | None) -> str:
 router = Router()
 
 
+def _issue_tokens(user: User) -> TokenResponse:
+    return TokenResponse(
+        access_token=create_access_token(user),
+        refresh_token=create_refresh_token(user),
+        user_id=user.id,
+        email=user.email,
+        role=user.role,
+        full_name=user.full_name,
+    )
+
+
 @router.post('/login', response=TokenResponse, auth=None)
 def login(request, data: LoginRequest):
-    # Always authenticate against TPMS — no manual DCM user creation needed.
+    # Native (non-TPMS) users: a real password, bound to this request's tenant.
+    # TPMS-provisioned users always have set_unusable_password() called on
+    # them, so they can never match this branch — it's purely additive.
+    native_user = User.objects.filter(email=data.email, organization=request.tenant).first()
+    if native_user and native_user.has_usable_password() and native_user.check_password(data.password):
+        if not native_user.is_active:
+            raise HttpError(403, 'Account is inactive')
+        return _issue_tokens(native_user)
+
+    # Otherwise authenticate against TPMS — no manual DCM user creation needed.
     # A DCM user record is auto-provisioned transparently on first login so the
     # JWT system has a user object to reference.
     return _tpms_auth(data.email, data.password)
@@ -173,14 +193,7 @@ def _tpms_auth(email: str, password: str) -> TokenResponse:
             if update_fields:
                 user.save(update_fields=update_fields)
 
-    return TokenResponse(
-        access_token=create_access_token(user),
-        refresh_token=create_refresh_token(user),
-        user_id=user.id,
-        email=user.email,
-        role=user.role,
-        full_name=user.full_name,
-    )
+    return _issue_tokens(user)
 
 
 
@@ -191,6 +204,8 @@ def refresh_token(request, data: RefreshRequest):
         if payload.get('type') != 'refresh':
             raise HttpError(401, 'Invalid token type')
         user = User.objects.get(id=int(payload['sub']), is_active=True)
+        if user_tenant_mismatch(user, request):
+            raise HttpError(401, 'Invalid or expired token')
         return AccessTokenResponse(access_token=create_access_token(user))
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, User.DoesNotExist, KeyError):
         raise HttpError(401, 'Invalid or expired token')
@@ -268,7 +283,7 @@ def list_admin_staffs(request, include_inactive: bool = False):
     if not request.user.has_role('admin', 'supervisor'):
         raise HttpError(403, 'Admin or supervisor access required')
     if request.user.tpms_admin_id is None:
-        return []
+        return _list_native_staffs(request, include_inactive)
     from apps.legacy.models import TpmsEmployee
     qs = TpmsEmployee.objects.using('therapypms').filter(
         admin_id=request.user.tpms_admin_id,
@@ -276,6 +291,31 @@ def list_admin_staffs(request, include_inactive: bool = False):
     if not include_inactive:
         qs = qs.filter(is_active=1)
     return list(qs.order_by('last_name', 'first_name'))
+
+
+def _list_native_staffs(request, include_inactive: bool) -> list[StaffSchema]:
+    """Native (non-TPMS) equivalent of list_admin_staffs — lists local Users
+    bound to this admin's Organization instead of TPMS employees."""
+    if request.user.organization_id is None:
+        return []
+    qs = User.objects.filter(organization_id=request.user.organization_id)
+    if not include_inactive:
+        qs = qs.filter(is_active=True)
+    return [
+        StaffSchema(
+            id=u.id,
+            admin_id=None,
+            first_name=u.first_name,
+            last_name=u.last_name,
+            full_name=u.full_name,
+            login_email=u.email,
+            office_email=None,
+            employee_type=u.role,
+            is_active=u.is_active,
+            dcm_user_id=u.id,
+        )
+        for u in qs.order_by('last_name', 'first_name')
+    ]
 
 
 @router.post('/users', response={201: UserSchema, 400: ErrorResponse}, auth=jwt_auth)
@@ -290,6 +330,7 @@ def create_user(request, data: UserCreateRequest):
         last_name=data.last_name,
         role=data.role,
         password=data.password,
+        organization=request.user.organization,
     )
     return 201, user
 

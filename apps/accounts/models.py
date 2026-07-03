@@ -40,6 +40,16 @@ class User(AbstractBaseUser, PermissionsMixin):
     tpms_admin_id = models.IntegerField(null=True, blank=True, db_index=True)
     # TPMS employee pk — set at login for staff/supervisor, null for admin-only logins
     tpms_employee_id = models.IntegerField(null=True, blank=True, db_index=True)
+    # Set for native (non-TPMS) users — binds them to one Organization/tenant.
+    # Null for TPMS users, who are scoped via tpms_admin_id instead and are
+    # exempt from tenant-binding checks (see accounts.auth.user_tenant_mismatch).
+    organization = models.ForeignKey(
+        'tenants.Organization',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='users',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
