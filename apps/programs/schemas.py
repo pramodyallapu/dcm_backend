@@ -224,6 +224,7 @@ class TargetSchema(Schema):
     program_id: int
     name: str
     measurement_type: str
+    sub_items: list[dict] = []
     prompting_template_id: int | None
     mastery_template_id: int | None
     workflow_template_id: int | None
@@ -242,13 +243,14 @@ class TargetSchema(Schema):
 class TargetCreateRequest(Schema):
     name: str
     measurement_type: str = 'discrete_trial'
+    sub_items: list[dict] = []
     prompting_template_id: int | None = None
     mastery_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     sd_text: str = ''
     teaching_instructions: str = ''
-    status: str = 'waiting'
+    status: str = ''  # empty = resolve server-side to the org's default TargetStatus
     display_order: int = 0
     is_visible_to_staff: bool = True
 
@@ -256,6 +258,7 @@ class TargetCreateRequest(Schema):
 class TargetUpdateRequest(Schema):
     name: str | None = None
     measurement_type: str | None = None
+    sub_items: list[dict] | None = None
     prompting_template_id: int | None = None
     mastery_template_id: int | None = None
     workflow_template_id: int | None = None
@@ -407,6 +410,42 @@ class ProgramTagSchema(Schema):
 class ProgramTagRequest(Schema):
     name: str
     color: str = '#6366f1'
+
+
+# ---------------------------------------------------------------------------
+# Target Statuses
+# ---------------------------------------------------------------------------
+
+class TargetStatusSchema(Schema):
+    id: int
+    key: str
+    label: str
+    color: str
+    icon: str
+    is_staff_visible: bool
+    is_default: bool
+    display_order: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class TargetStatusRequest(Schema):
+    key: str
+    label: str
+    color: str = '#6366f1'
+    icon: str = 'circle'
+    is_staff_visible: bool = False
+    is_default: bool = False
+    display_order: int = 0
+
+
+class TargetStatusUpdateRequest(Schema):
+    label: str | None = None
+    color: str | None = None
+    icon: str | None = None
+    is_staff_visible: bool | None = None
+    is_default: bool | None = None
+    display_order: int | None = None
 
 
 # ---------------------------------------------------------------------------

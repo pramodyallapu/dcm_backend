@@ -697,6 +697,7 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
             session_run_id=session_id,
             target_id=t.target_id,
             trial_number=t.trial_number,
+            sub_item_key=t.sub_item_key,
             defaults={
                 'target_name': t.target_name,
                 'response_score': t.response_score,

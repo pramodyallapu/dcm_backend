@@ -54,6 +54,7 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                 'name': target.name,
                 'status': target.status,
                 'measurement_type': target.measurement_type,
+                'sub_items': target.sub_items,
                 'sd_text': target.sd_text,
                 'teaching_instructions': target.teaching_instructions,
                 'prompting_template': {

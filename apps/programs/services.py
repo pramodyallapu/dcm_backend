@@ -32,6 +32,50 @@ def evaluate_session_mastery(session_run) -> list[Target]:
     return advanced
 
 
+def _pass_stats(target: Target, trials_qs) -> tuple[int, int]:
+    """
+    Returns (total_passes, correct_passes) for one target's trials in one session.
+
+    - Plain targets (no sub_items — discrete_trial and friends): one TrialEvent row
+      is one pass; correct means response_score > 0. Unchanged from before sub_items existed.
+    - Shaping: one row per pass (whichever sub_item_key/level was reached that trial);
+      correct only if the level reached is the terminal (last) entry in target.sub_items.
+    - Task analysis / set of targets: multiple rows share one trial_number, together
+      forming one pass. A pass only counts once every sub_item has been scored in it
+      (an in-progress/incomplete pass doesn't count toward total or correct), and is
+      correct only if every one of those rows was scored correct — independent
+      completion of the whole chain/set, not a per-step average.
+    """
+    if not target.sub_items:
+        total = trials_qs.count()
+        correct = trials_qs.filter(response_score__gt=0).count()
+        return total, correct
+
+    if target.measurement_type == Target.MeasurementType.SHAPING:
+        terminal_key = target.sub_items[-1].get('key')
+        total = trials_qs.count()
+        correct = trials_qs.filter(sub_item_key=terminal_key).count()
+        return total, correct
+
+    expected_keys = {item.get('key') for item in target.sub_items}
+    scored_keys: dict[int, set] = {}
+    correct_keys: dict[int, set] = {}
+    for score, trial_number, key in trials_qs.values_list('response_score', 'trial_number', 'sub_item_key'):
+        scored_keys.setdefault(trial_number, set()).add(key)
+        if score > 0:
+            correct_keys.setdefault(trial_number, set()).add(key)
+
+    total = 0
+    correct = 0
+    for trial_number, keys in scored_keys.items():
+        if keys != expected_keys:
+            continue
+        total += 1
+        if correct_keys.get(trial_number) == expected_keys:
+            correct += 1
+    return total, correct
+
+
 def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
     """
     Returns True if the target's status was advanced.
@@ -77,10 +121,9 @@ def _advance_if_criteria_met(target: Target, session_run_id: int) -> bool:
 
     for session in recent_sessions:
         trials = TrialEvent.objects.filter(session_run=session, target_id=target.id)
-        total = trials.count()
+        total, correct = _pass_stats(target, trials)
         if total < min_trials:
             return False
-        correct = trials.filter(response_score=1).count()
         if (correct / total * 100) < threshold_pct:
             return False
 

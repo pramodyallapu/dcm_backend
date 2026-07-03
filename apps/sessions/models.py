@@ -138,13 +138,17 @@ class TrialEvent(models.Model):
     trial_number = models.PositiveIntegerField()
     response_score = models.IntegerField()
     prompt_level_label = models.CharField(max_length=100)
+    # Blank for a plain single-target trial (discrete_trial). Set to one of the
+    # target's sub_items[].key for task_analysis/set_of_targets/shaping — multiple
+    # rows then share one trial_number, together representing a single "pass".
+    sub_item_key = models.CharField(max_length=100, blank=True, default='')
     recorded_at = models.DateTimeField(db_index=True)
     staff_notes = models.TextField(blank=True)
 
     class Meta:
         app_label = 'dcm_sessions'
         ordering = ['target_id', 'trial_number']
-        unique_together = [['session_run', 'target_id', 'trial_number']]
+        unique_together = [['session_run', 'target_id', 'trial_number', 'sub_item_key']]
 
     def __str__(self) -> str:
         return f'Trial {self.trial_number} — target {self.target_id} [{self.prompt_level_label}]'

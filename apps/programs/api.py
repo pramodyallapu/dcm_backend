@@ -7,7 +7,7 @@ from .models import (
     Program, Target, PromptingTemplate, MasteryTemplate,
     WorkflowTemplate, MaintenanceSchedule,
     Lesson, LessonProgram,
-    TreatmentArea, ProgramTag, ProgramDataField,
+    TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
     TargetStatusChange,
 )
 from .schemas import (
@@ -25,6 +25,7 @@ from .schemas import (
     ProgramTagSchema, ProgramTagRequest,
     ProgramDataFieldSchema, ProgramDataFieldRequest,
     TargetStatusChangeSchema,
+    TargetStatusSchema, TargetStatusRequest, TargetStatusUpdateRequest,
 )
 
 router = Router(auth=jwt_auth)
@@ -177,6 +178,9 @@ def create_target(request, program_id: int, data: TargetCreateRequest):
     target_data = data.dict()
     if program.workflow_template_id and not target_data.get('workflow_template_id'):
         target_data['workflow_template_id'] = program.workflow_template_id
+    if not target_data.get('status'):
+        default_status = TargetStatus.objects.filter(is_default=True).first()
+        target_data['status'] = default_status.key if default_status else Target.Status.WAITING
     target = Target.objects.create(
         program=program,
         created_by=request.user,
@@ -767,6 +771,51 @@ def delete_program_tag(request, pk: int):
     try:
         ProgramTag.objects.get(id=pk).delete()
     except ProgramTag.DoesNotExist:
+        raise HttpError(404, 'Not found')
+    return 204, None
+
+
+# ---------------------------------------------------------------------------
+# Target Statuses
+# ---------------------------------------------------------------------------
+
+@router.get('/programs/settings/statuses', response=list[TargetStatusSchema])
+def list_target_statuses(request):
+    return list(TargetStatus.objects.all())
+
+
+@router.post('/programs/settings/statuses', response={201: TargetStatusSchema})
+def create_target_status(request, data: TargetStatusRequest):
+    _require_admin(request)
+    if TargetStatus.objects.filter(key=data.key).exists():
+        raise HttpError(409, f'A status with key "{data.key}" already exists')
+    if data.is_default:
+        TargetStatus.objects.filter(is_default=True).update(is_default=False)
+    return 201, TargetStatus.objects.create(created_by=request.user, **data.dict())
+
+
+@router.patch('/programs/settings/statuses/{pk}', response=TargetStatusSchema)
+def update_target_status(request, pk: int, data: TargetStatusUpdateRequest):
+    _require_admin(request)
+    try:
+        obj = TargetStatus.objects.get(id=pk)
+    except TargetStatus.DoesNotExist:
+        raise HttpError(404, 'Not found')
+    update = data.dict(exclude_none=True)
+    if update.get('is_default'):
+        TargetStatus.objects.filter(is_default=True).exclude(id=pk).update(is_default=False)
+    for k, v in update.items():
+        setattr(obj, k, v)
+    obj.save()
+    return obj
+
+
+@router.delete('/programs/settings/statuses/{pk}', response={204: None})
+def delete_target_status(request, pk: int):
+    _require_admin(request)
+    try:
+        TargetStatus.objects.get(id=pk).delete()
+    except TargetStatus.DoesNotExist:
         raise HttpError(404, 'Not found')
     return 204, None
 

@@ -131,6 +131,7 @@ class TrialEventSchema(Schema):
     trial_number: int
     response_score: int
     prompt_level_label: str
+    sub_item_key: str = ''
     recorded_at: datetime
     staff_notes: str
 
@@ -141,6 +142,7 @@ class TrialEventCreateRequest(Schema):
     trial_number: int
     response_score: int
     prompt_level_label: str
+    sub_item_key: str = ''
     recorded_at: datetime
     staff_notes: str = ''
 

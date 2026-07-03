@@ -101,11 +101,7 @@ class TargetQuerySet(models.QuerySet):
         """Returns only the targets that should appear in the mobile session execution view."""
         return self.filter(
             is_visible_to_staff=True,
-            status__in=[
-                Target.Status.PROBE,
-                Target.Status.ACQUISITION,
-                Target.Status.MASTERED,
-            ],
+            status__in=TargetStatus.objects.filter(is_staff_visible=True).values_list('key', flat=True),
         )
 
 
@@ -150,6 +146,10 @@ class Target(TenantAwareModel):
         choices=MeasurementType.choices,
         default=MeasurementType.DISCRETE_TRIAL,
     )
+    # Ordered list of {"key": str, "label": str}. Used by task_analysis (sequential
+    # steps), set_of_targets (independent items), and shaping (approximation levels,
+    # last entry = terminal/goal level). Unused (empty) by every other measurement type.
+    sub_items = models.JSONField(default=list, blank=True)
     prompting_template = models.ForeignKey(
         PromptingTemplate,
         on_delete=models.SET_NULL,
@@ -179,7 +179,9 @@ class Target(TenantAwareModel):
     maintenance_episodes_completed = models.PositiveIntegerField(default=0)
     sd_text = models.TextField(blank=True, verbose_name='Discriminative Stimulus')
     teaching_instructions = models.TextField(blank=True)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.WAITING, db_index=True)
+    # No longer choice-constrained — status keys are org-configurable via TargetStatus.
+    # Status class above is kept as a reference to the legacy built-in keys (used by the seed migration).
+    status = models.CharField(max_length=20, default=Status.WAITING, db_index=True)
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_visible_to_staff = models.BooleanField(default=True)
@@ -320,6 +322,29 @@ class ProgramTag(TenantAwareModel):
 
     def __str__(self):
         return self.name
+
+
+class TargetStatus(TenantAwareModel):
+    """
+    Org-configurable status options for Target.status (icon/label/color), replacing
+    what used to be a fixed set of 7 statuses. `key` is the literal string stored on
+    Target.status — immutable in practice once targets reference it.
+    """
+    key = models.SlugField(max_length=20)
+    label = models.CharField(max_length=50)
+    color = models.CharField(max_length=7, default='#6366f1')  # hex color
+    icon = models.CharField(max_length=30, default='circle')
+    is_staff_visible = models.BooleanField(default=False, help_text='Shown to staff in the session recording view')
+    is_default = models.BooleanField(default=False, help_text='Starting status for newly created targets')
+    display_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        app_label = 'programs'
+        ordering = ['display_order', 'label']
+        unique_together = [['key']]
+
+    def __str__(self):
+        return self.label
 
 
 class ProgramDataField(TenantAwareModel):
