@@ -152,7 +152,9 @@ class NoteRejectRequest(Schema):
 class ReviewQueueItem(Schema):
     id: int
     client_id: int
+    client_name: str | None
     staff_id: int | None
+    staff_name: str | None
     note_date: date
     submitted_at: datetime | None
     template_name: str | None

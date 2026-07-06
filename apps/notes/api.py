@@ -6,6 +6,7 @@ from ninja import Router
 from ninja.errors import HttpError
 
 from apps.accounts.auth import jwt_auth
+from apps.clients.models import Client
 from .models import LessonNote, NoteTemplate, NoteSignature, NoteAssignment
 from .schemas import (
     LessonNoteSchema, LessonNoteListSchema, NoteCreateRequest, NoteUpdateRequest,
@@ -314,7 +315,7 @@ def review_queue(
     qs = (
         LessonNote.objects
         .filter(status=LessonNote.Status.SUBMITTED)
-        .select_related('template')
+        .select_related('template', 'staff')
         .order_by('submitted_at')
     )
     if client_id:
@@ -324,17 +325,25 @@ def review_queue(
     if date_to:
         qs = qs.filter(note_date__lte=date_to)
 
+    notes = list(qs)
+    client_names = {
+        c.id: c.full_name
+        for c in Client.objects.filter(id__in=[n.client_id for n in notes if n.client_id is not None])
+    }
+
     return [
         {
             'id': note.id,
             'client_id': note.client_id,
+            'client_name': client_names.get(note.client_id),
             'staff_id': note.staff_id,
+            'staff_name': note.staff.full_name if note.staff_id else None,
             'note_date': note.note_date,
             'submitted_at': note.submitted_at,
             'template_name': note.template.name if note.template else None,
             'session_run_id': note.session_run_id,
         }
-        for note in qs
+        for note in notes
     ]
 
 
