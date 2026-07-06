@@ -125,7 +125,7 @@ DATABASES = {
         'CONN_MAX_AGE': 60,
     },
     # Read-only connection to the TherapyPMS source-of-truth database.
-    # Django never migrates this DB — schema is owned by the Laravel app.
+    # Django never migrates this DB — schema.
     'therapypms': {
         'ENGINE': 'apps.legacy.backend',
         'NAME': env('TPMS_DB_NAME', default='therapypms'),
