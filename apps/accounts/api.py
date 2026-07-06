@@ -100,6 +100,15 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     from apps.legacy.models import TpmsAdmin, TpmsEmployee
     from django.db.models import Q
 
+    # Only match TPMS records belonging to the practice mapped to this tenant.
+    # request.tenant is resolved purely from the Host header (see
+    # shared/middleware.py), so without this check, valid TPMS credentials for
+    # a different practice would authenticate here and receive a token scoped
+    # to *this* tenant — a cross-tenant auth bypass. `tenant_tpms_admin_id is
+    # not None` guards against a tenant with no mapped practice matching a
+    # legacy record whose admin_id also happens to be null.
+    tenant_tpms_admin_id = request.tenant.tpms_admin_id
+
     # Collect candidate records from both tables, then pick the one whose
     # password verifies. A user can exist in admins (practice owner) AND
     # employees (provider) — we must try both.
@@ -109,7 +118,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
         admin = TpmsAdmin.objects.using('therapypms').get(
             Q(email=email) | Q(login_email=email)
         )
-        if admin.password:
+        if admin.password and tenant_tpms_admin_id is not None and _tpms_effective_admin_id(admin) == tenant_tpms_admin_id:
             candidates.append({
                 'hashed_password': admin.password,
                 'is_active': bool(admin.active),
@@ -124,7 +133,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
         for admin in TpmsAdmin.objects.using('therapypms').filter(
             Q(email=email) | Q(login_email=email)
         ):
-            if admin.password:
+            if admin.password and tenant_tpms_admin_id is not None and _tpms_effective_admin_id(admin) == tenant_tpms_admin_id:
                 candidates.append({
                     'hashed_password': admin.password,
                     'is_active': bool(admin.active),
@@ -137,7 +146,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     external_employee_id: int | None = None
     try:
         employee = TpmsEmployee.objects.using('therapypms').get(login_email=email)
-        if employee.password:
+        if employee.password and tenant_tpms_admin_id is not None and employee.admin_id == tenant_tpms_admin_id:
             external_employee_id = employee.id
             candidates.append({
                 'hashed_password': employee.password,

@@ -16,6 +16,10 @@ class Command(BaseCommand):
         parser.add_argument('--plan', default='starter', choices=['starter', 'professional', 'enterprise'])
         parser.add_argument('--admin-email', dest='admin_email', help='Create an admin user inside the new schema')
         parser.add_argument('--admin-password', dest='admin_password', help='Password for the admin user')
+        parser.add_argument(
+            '--tpms-admin-id', dest='tpms_admin_id', type=int, default=None,
+            help='TherapyPMS practice admin id this org maps to — required for staff to log in via TPMS credentials',
+        )
 
     def handle(self, *args, **options):
         name = options['name']
@@ -24,6 +28,7 @@ class Command(BaseCommand):
         plan = options['plan']
         admin_email = options.get('admin_email')
         admin_password = options.get('admin_password')
+        tpms_admin_id = options.get('tpms_admin_id')
 
         if not re.match(r'^[a-z][a-z0-9_]{1,61}$', schema):
             raise CommandError(
@@ -40,10 +45,13 @@ class Command(BaseCommand):
         if admin_email and not admin_password:
             raise CommandError('--admin-password is required when --admin-email is provided.')
 
+        if tpms_admin_id is not None and Organization.objects.filter(tpms_admin_id=tpms_admin_id).exists():
+            raise CommandError(f'TPMS admin id {tpms_admin_id} is already mapped to another organization.')
+
         self.stdout.write(f'Creating organization "{name}" …')
 
         with transaction.atomic():
-            org = Organization(schema_name=schema, name=name, slug=schema, plan=plan)
+            org = Organization(schema_name=schema, name=name, slug=schema, plan=plan, tpms_admin_id=tpms_admin_id)
             org.save()  # triggers auto_create_schema
 
             Domain.objects.create(tenant=org, domain=domain, is_primary=True)

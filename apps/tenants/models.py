@@ -12,6 +12,10 @@ class Organization(TenantMixin):
     slug = models.SlugField(unique=True)
     plan = models.CharField(max_length=20, choices=Plan.choices, default=Plan.STARTER)
     is_active = models.BooleanField(default=True)
+    # The TherapyPMS practice this tenant corresponds to (TpmsAdmin's effective
+    # id — see accounts.api._tpms_effective_admin_id). Required to scope TPMS
+    # login lookups to this tenant; without it, TPMS auth is not accepted here.
+    tpms_admin_id = models.IntegerField(null=True, blank=True, unique=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

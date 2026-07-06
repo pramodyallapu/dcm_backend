@@ -110,6 +110,49 @@ PROGRAMS = [
 ]
 
 
+ORG_PROGRAM_TEMPLATES = [
+    {
+        'name': 'Mand Training — Template',
+        'category': 'skill_acquisition',
+        'treatment_area': 'Communication',
+        'phase': 'teaching',
+        'objective': 'Standard mand-training template for facility-wide reuse — copy to a client and adjust targets as needed.',
+        'instructions': 'Use the PECS or vocal mand protocol. Present the preferred item just out of reach and wait for a spontaneous mand before prompting.',
+        'tags': ['Communication'],
+        'targets': [
+            {'name': 'Request preferred item', 'measurement_type': 'discrete_trial', 'status': 'waiting', 'sd_text': 'Present item just out of reach, pause 5s'},
+            {'name': 'Request break', 'measurement_type': 'discrete_trial', 'status': 'waiting', 'sd_text': 'Present task demand, wait for mand'},
+        ],
+    },
+    {
+        'name': 'Receptive Identification — Template',
+        'category': 'skill_acquisition',
+        'treatment_area': 'Language',
+        'phase': 'teaching',
+        'objective': 'Generic receptive-ID template (colors, shapes, body parts, etc.) — swap in target-specific stimuli per client.',
+        'instructions': 'Present 2-3 field array. Ask "Show me ___". Use errorless learning initially, fading prompts systematically.',
+        'tags': ['New'],
+        'targets': [
+            {'name': 'Identify target 1', 'measurement_type': 'discrete_trial', 'status': 'waiting', 'sd_text': 'Show me ___'},
+            {'name': 'Identify target 2', 'measurement_type': 'discrete_trial', 'status': 'waiting', 'sd_text': 'Show me ___'},
+            {'name': 'Identify target 3', 'measurement_type': 'discrete_trial', 'status': 'waiting', 'sd_text': 'Show me ___'},
+        ],
+    },
+    {
+        'name': 'Behavior Reduction — Template',
+        'category': 'behavior_reduction',
+        'treatment_area': 'Behavior Management',
+        'phase': 'baseline',
+        'objective': 'Generic behavior-reduction template — define the target behavior operationally per client before assigning.',
+        'instructions': 'Record frequency/duration per the assigned measurement type. Confirm function via FBA before implementing a reduction procedure.',
+        'tags': ['Priority'],
+        'targets': [
+            {'name': 'Target behavior', 'measurement_type': 'frequency', 'status': 'waiting', 'sd_text': 'Record each occurrence'},
+        ],
+    },
+]
+
+
 class Command(BaseCommand):
     help = 'Seed Settings-page data, a demo client, and programs/targets for one Organization'
 
@@ -249,7 +292,54 @@ class Command(BaseCommand):
                 total_targets += 1
             self.stdout.write(f'  Created program: "{program.name}" ({len(prog_data["targets"])} targets)')
 
+        # ── Org-level program library (/org-programs) ───────────────────────
+        # Scoped by created_by.external_admin_id (apps/backend/apps/programs/api.py's
+        # _org_qs), not by `organization` — so the creator must share the same
+        # external_admin_id as whoever is logged in and viewing /org-programs.
+        from apps.accounts.models import User
+        creator = User.objects.filter(role='admin', external_admin_id__isnull=False).order_by('id').first()
+        total_templates = 0
+        total_template_targets = 0
+        if creator is None:
+            self.stdout.write(self.style.WARNING(
+                '  Skipping org-program library — no admin user with external_admin_id set was found.'
+            ))
+        else:
+            for i, tpl_data in enumerate(ORG_PROGRAM_TEMPLATES):
+                if Program.objects.filter(name=tpl_data['name'], is_template=True).exists():
+                    continue
+                wf = behavior_wf if tpl_data['category'] == 'behavior_reduction' else default_wf
+                template = Program.objects.create(
+                    is_template=True,
+                    external_client_id=None,
+                    name=tpl_data['name'],
+                    category=tpl_data['category'],
+                    treatment_area=tpl_data['treatment_area'],
+                    phase=tpl_data['phase'],
+                    objective=tpl_data['objective'],
+                    instructions=tpl_data['instructions'],
+                    tags=tpl_data['tags'],
+                    workflow_template=wf,
+                    status='active',
+                    display_order=i * 10,
+                    created_by=creator,
+                )
+                total_templates += 1
+                for j, t_data in enumerate(tpl_data['targets']):
+                    Target.objects.create(
+                        program=template,
+                        name=t_data['name'],
+                        measurement_type=t_data['measurement_type'],
+                        status=t_data['status'],
+                        sd_text=t_data.get('sd_text', ''),
+                        is_visible_to_staff=False,
+                        display_order=j * 10,
+                    )
+                    total_template_targets += 1
+                self.stdout.write(f'  Created org-program template: "{template.name}" ({len(tpl_data["targets"])} targets)')
+
         self.stdout.write(self.style.SUCCESS(
             f'\nDone — org "{org.name}": {total_programs} programs, {total_targets} targets, '
-            f'client id={client.id}, plus Settings-page data (statuses/areas/tags/fields/templates).'
+            f'client id={client.id}, {total_templates} org-program template(s) with {total_template_targets} target(s), '
+            f'plus Settings-page data (statuses/areas/tags/fields/templates).'
         ))
