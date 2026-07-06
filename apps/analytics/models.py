@@ -41,6 +41,13 @@ class GraphAnnotation(TenantAwareModel):
     style = models.CharField(max_length=10, choices=LineStyle.choices, default=LineStyle.SOLID)
     notes = models.TextField(blank=True)
 
+    # program is the owning parent (cross-app FK -> programs.Program);
+    # target is optional and cross-checked against it.
+    _org_scoped_fk_fields = ('target',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.program.organization_id
+
     class Meta:
         app_label = 'analytics'
         ordering = ['date']

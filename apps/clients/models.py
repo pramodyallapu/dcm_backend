@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.db import models
-from shared.models import TenantAwareModel
+from shared.models import OrganizationScopedMixin, TenantAwareModel
 
 
 class Client(TenantAwareModel):
@@ -35,7 +35,7 @@ class Client(TenantAwareModel):
         return self.full_name
 
 
-class ClientStaffAssignment(models.Model):
+class ClientStaffAssignment(OrganizationScopedMixin):
     """Tracks which staff members are assigned to which clients."""
     client = models.ForeignKey(
         Client,
@@ -51,6 +51,9 @@ class ClientStaffAssignment(models.Model):
     is_primary = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     assigned_at = models.DateTimeField(auto_now_add=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.client.organization_id
 
     class Meta:
         app_label = 'clients'

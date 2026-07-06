@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.db import models
-from shared.models import TenantAwareModel
+from shared.models import OrganizationScopedMixin, TenantAwareModel
 
 
 class Appointment(TenantAwareModel):
@@ -37,6 +37,8 @@ class Appointment(TenantAwareModel):
     notes = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SCHEDULED)
     synced_at = models.DateTimeField(null=True, blank=True)
+
+    _org_scoped_fk_fields = ('lesson',)  # cross-app FK -> programs.Lesson
 
     class Meta:
         app_label = 'dcm_sessions'
@@ -100,6 +102,8 @@ class SessionRun(TenantAwareModel):
     # Immutable snapshot taken at session start — the source of truth for reporting
     program_snapshot = models.JSONField(default=dict)
 
+    _org_scoped_fk_fields = ('lesson',)  # cross-app FK -> programs.Lesson
+
     class Meta:
         app_label = 'dcm_sessions'
         ordering = ['-started_at']
@@ -120,7 +124,7 @@ class SessionRun(TenantAwareModel):
         return f'Session {self.id} [{self.status}] — client {self.external_client_id}'
 
 
-class TrialEvent(models.Model):
+class TrialEvent(OrganizationScopedMixin):
     """
     One scored trial for a target within a session.
     Immutable after session submission — never update, only insert.
@@ -145,6 +149,9 @@ class TrialEvent(models.Model):
     recorded_at = models.DateTimeField(db_index=True)
     staff_notes = models.TextField(blank=True)
 
+    def _derive_organization_id(self) -> int | None:
+        return self.session_run.organization_id
+
     class Meta:
         app_label = 'dcm_sessions'
         ordering = ['target_id', 'trial_number']
@@ -154,7 +161,7 @@ class TrialEvent(models.Model):
         return f'Trial {self.trial_number} — target {self.target_id} [{self.prompt_level_label}]'
 
 
-class BehaviorEvent(models.Model):
+class BehaviorEvent(OrganizationScopedMixin):
     """
     A behavior-reduction data point recorded during a session.
     target_id / target_name are snapshot values.
@@ -178,6 +185,9 @@ class BehaviorEvent(models.Model):
     severity = models.CharField(max_length=10, choices=Severity.choices, blank=True)
     notes = models.TextField(blank=True)
 
+    def _derive_organization_id(self) -> int | None:
+        return self.session_run.organization_id
+
     class Meta:
         app_label = 'dcm_sessions'
         ordering = ['occurred_at']
@@ -186,7 +196,7 @@ class BehaviorEvent(models.Model):
         return f'Behavior {self.target_name} @ {self.occurred_at:%H:%M}'
 
 
-class ABCEvent(models.Model):
+class ABCEvent(OrganizationScopedMixin):
     """Antecedent–Behavior–Consequence data entry."""
     session_run = models.ForeignKey(
         SessionRun,
@@ -200,6 +210,9 @@ class ABCEvent(models.Model):
     setting = models.CharField(max_length=200, blank=True)
     staff_response = models.TextField(blank=True)
     notes = models.TextField(blank=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.session_run.organization_id
 
     class Meta:
         app_label = 'dcm_sessions'

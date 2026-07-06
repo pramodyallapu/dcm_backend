@@ -14,6 +14,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django_tenants.utils import schema_context
 
 from apps.programs.models import Program, Target, WorkflowTemplate, PromptingTemplate
+from apps.tenants.models import Organization
+from shared.tenancy import tenant_context
 
 
 WORKFLOWS = [
@@ -166,7 +168,12 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         with schema_context(options['schema']):
-            self._seed(options['client_id'], options['clear'], options['seed_sessions'], options['days'])
+            try:
+                org = Organization.objects.get(schema_name=options['schema'])
+            except Organization.DoesNotExist:
+                raise CommandError(f'No Organization with schema_name "{options["schema"]}"')
+            with tenant_context(org.pk):
+                self._seed(options['client_id'], options['clear'], options['seed_sessions'], options['days'])
 
     def _seed(self, client_id: int, clear: bool, seed_sessions: bool, days: int):
         from apps.clients.models import Client
@@ -333,6 +340,7 @@ class Command(BaseCommand):
                     for trial_num in range(1, 11):
                         correct = random.random() < acc
                         trial_events.append(TrialEvent(
+                            organization_id=session.organization_id,  # bulk_create bypasses save()'s auto-stamp
                             session_run=session,
                             target_id=target.id,
                             target_name=target.name,

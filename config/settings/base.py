@@ -60,6 +60,13 @@ TENANT_DOMAIN_MODEL = 'tenants.Domain'
 
 MIDDLEWARE = [
     'django_tenants.middleware.main.TenantMainMiddleware',
+    # TRANSITIONAL (M1->M2 of the shared-schema migration): sets the
+    # organization contextvar (shared/tenancy.py) that already-migrated
+    # models (Client, Program, Target) require, alongside the still-active
+    # schema switch above for everything not yet migrated. Once M3 finishes
+    # the migration, TenantMainMiddleware is removed and this becomes the
+    # only tenant-resolution middleware.
+    'shared.middleware.TenantResolverMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',

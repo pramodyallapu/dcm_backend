@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.db import models
-from shared.models import TenantAwareModel
+from shared.models import OrganizationScopedMixin, TenantAwareModel
 
 
 class NoteTemplate(TenantAwareModel):
@@ -90,6 +90,10 @@ class LessonNote(TenantAwareModel):
     docuseal_slug = models.CharField(max_length=64, blank=True)
     docuseal_completed_at = models.DateTimeField(null=True, blank=True)
 
+    # session_run is a cross-app FK (-> dcm_sessions.SessionRun) and nullable,
+    # so organization comes from the ambient context, not derived from it.
+    _org_scoped_fk_fields = ('session_run', 'template')
+
     class Meta:
         app_label = 'notes'
         ordering = ['-note_date', '-created_at']
@@ -126,9 +130,14 @@ class NoteAssignment(TenantAwareModel):
         related_name='assignment',
     )
 
+    _org_scoped_fk_fields = ('template', 'note')
+
     class Meta:
         app_label = 'notes'
-        unique_together = [('external_appointment_id', 'template')]
+        # external_appointment_id used to be unique-per-template only because
+        # each org had its own schema — two orgs could plausibly share a TPMS
+        # appointment id (e.g. cloned staging data), so scope by organization too.
+        unique_together = [('organization', 'external_appointment_id', 'template')]
         ordering = ['created_at']
 
     @property
@@ -139,7 +148,7 @@ class NoteAssignment(TenantAwareModel):
         return f'Assignment {self.id} — appt {self.external_appointment_id} → {self.template.name}'
 
 
-class NoteSignature(models.Model):
+class NoteSignature(OrganizationScopedMixin):
     """
     Timestamped, attributable signature on an approved note.
     signer_name is stored as a snapshot so the audit trail survives
@@ -162,6 +171,9 @@ class NoteSignature(models.Model):
     signature_data = models.TextField(blank=True)
     signed_at = models.DateTimeField(auto_now_add=True)
     ip_address_hash = models.CharField(max_length=64, blank=True)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.note.organization_id
 
     class Meta:
         app_label = 'notes'

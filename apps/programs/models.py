@@ -1,5 +1,6 @@
 from django.db import models
-from shared.models import TenantAwareModel
+from shared.models import OrganizationScopedMixin, TenantAwareModel
+from shared.tenancy import TenantManager, TenantQuerySet
 
 
 class PromptingTemplate(TenantAwareModel):
@@ -84,6 +85,8 @@ class Program(TenantAwareModel):
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     archived_at = models.DateTimeField(null=True, blank=True)
 
+    _org_scoped_fk_fields = ('workflow_template', 'maintenance_schedule')
+
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'name']
@@ -96,7 +99,7 @@ class Program(TenantAwareModel):
         return f'{self.name} ({self.external_client_id})'
 
 
-class TargetQuerySet(models.QuerySet):
+class TargetQuerySet(TenantQuerySet):
     def visible_to_staff(self) -> 'TargetQuerySet':
         """Returns only the targets that should appear in the mobile session execution view."""
         return self.filter(
@@ -133,7 +136,11 @@ class Target(TenantAwareModel):
         WHOLE_INTERVAL   = 'whole_interval',   'Whole Interval (legacy)'
         PARTIAL_INTERVAL = 'partial_interval', 'Partial Interval (legacy)'
 
-    objects = TargetQuerySet.as_manager()
+    # Rebuilt (not TargetQuerySet.as_manager()) so this still gets the
+    # auto tenant-scoping every other TenantAwareModel manager has — see
+    # shared/tenancy.py's TenantManager docstring for why .as_manager()
+    # alone would have silently dropped that.
+    objects = TenantManager.from_queryset(TargetQuerySet)()
 
     program = models.ForeignKey(
         Program,
@@ -185,6 +192,15 @@ class Target(TenantAwareModel):
     mastery_mode = models.CharField(max_length=10, choices=MasteryMode.choices, default=MasteryMode.MANUAL)
     display_order = models.PositiveIntegerField(default=0, db_index=True)
     is_visible_to_staff = models.BooleanField(default=True)
+
+    # program is the owning parent — a Target can never legitimately belong
+    # to a different organization than its Program, so derive rather than
+    # rely on the ambient tenant context (which could theoretically be
+    # wrong if this is ever created from a background job).
+    _org_scoped_fk_fields = ('prompting_template', 'mastery_template', 'workflow_template', 'maintenance_schedule')
+
+    def _derive_organization_id(self) -> int | None:
+        return self.program.organization_id
 
     class Meta:
         app_label = 'programs'
@@ -293,6 +309,9 @@ class TargetStatusChange(TenantAwareModel):
     trigger = models.CharField(max_length=20, choices=Trigger.choices)
     session_run_id = models.PositiveIntegerField(null=True, blank=True)
 
+    def _derive_organization_id(self) -> int | None:
+        return self.target.organization_id
+
     class Meta:
         app_label = 'programs'
         ordering = ['-created_at']
@@ -345,7 +364,11 @@ class TargetStatus(TenantAwareModel):
     class Meta:
         app_label = 'programs'
         ordering = ['display_order', 'label']
-        unique_together = [['key']]
+        # 'key' used to be unique per-tenant only because each tenant had its
+        # own schema — now that all orgs share one table, it must be unique
+        # per-organization instead, or Org A and Org B could never both have
+        # a status keyed 'waiting'.
+        unique_together = [('organization', 'key')]
 
     def __str__(self):
         return self.label
@@ -402,11 +425,18 @@ class Lesson(TenantAwareModel):
         return f'{self.name} ({self.external_client_id})'
 
 
-class LessonProgram(models.Model):
+class LessonProgram(OrganizationScopedMixin):
     """Join table — controls which programs appear in a lesson and in what order."""
     lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='lesson_programs')
     program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='lesson_programs')
     display_order = models.PositiveIntegerField(default=0)
+
+    # lesson is the owning parent; program is cross-checked against it so a
+    # lesson can never pull in another organization's program.
+    _org_scoped_fk_fields = ('program',)
+
+    def _derive_organization_id(self) -> int | None:
+        return self.lesson.organization_id
 
     class Meta:
         app_label = 'programs'
