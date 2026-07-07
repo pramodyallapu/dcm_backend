@@ -117,22 +117,22 @@ TEMPLATES = [
 DATABASES = {
     'default': {
         'ENGINE': 'django_tenants.postgresql_backend',
-        'NAME': env('DB_NAME', default='dcm'),
-        'USER': env('DB_USER', default='dcm_user'),
-        'PASSWORD': env('DB_PASSWORD', default='dcm_pass'),
-        'HOST': env('DB_HOST', default='localhost'),
-        'PORT': env('DB_PORT', default='5432'),
+        'NAME': env('DB_NAME'),
+        'USER': env('DB_USER'),
+        'PASSWORD': env('DB_PASSWORD'),
+        'HOST': env('DB_HOST'),
+        'PORT': env('DB_PORT'),
         'CONN_MAX_AGE': 60,
     },
     # Read-only connection to the TherapyPMS source-of-truth database.
     # Django never migrates this DB — schema.
     'therapypms': {
         'ENGINE': 'apps.legacy.backend',
-        'NAME': env('TPMS_DB_NAME', default='therapypms'),
-        'USER': env('TPMS_DB_USER', default='tpms_readonly'),
-        'PASSWORD': env('TPMS_DB_PASSWORD', default=''),
-        'HOST': env('TPMS_DB_HOST', default='localhost'),
-        'PORT': env('TPMS_DB_PORT', default='5432'),
+        'NAME': env('TPMS_DB_NAME'),
+        'USER': env('TPMS_DB_USER'),
+        'PASSWORD': env('TPMS_DB_PASSWORD'),
+        'HOST': env('TPMS_DB_HOST'),
+        'PORT': env('TPMS_DB_PORT'),
         'CONN_MAX_AGE': 60,
         'OPTIONS': {
             'options': '-c default_transaction_read_only=on',
@@ -205,12 +205,9 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-if not DEBUG:
-    # S3 media storage — django-storages/boto3 are production-only
-    # dependencies (requirements/production.txt), so this must stay behind
-    # `not DEBUG` rather than running unconditionally.
+AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default='')
+if not DEBUG and AWS_ACCESS_KEY_ID:
     DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
-    AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID')
     AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY')
     AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME')
     AWS_S3_REGION_NAME = env('AWS_S3_REGION_NAME', default='us-east-1')
