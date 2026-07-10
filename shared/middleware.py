@@ -16,14 +16,13 @@ class TenantResolverMiddleware:
 
     def __call__(self, request):
         hostname = request.get_host().split(':')[0]
-        request.tenant = None
-
         try:
             domain = Domain.objects.select_related('tenant').get(domain=hostname)
             request.tenant = domain.tenant
         except Domain.DoesNotExist:
             pass
 
-        org_id = request.tenant.pk if request.tenant else None
+        tenant = getattr(request, 'tenant', None)
+        org_id = tenant.pk if tenant else None
         with tenant_context(org_id):
             return self.get_response(request)
