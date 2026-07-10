@@ -17,6 +17,9 @@ else:
     # accepting requests for an unconfigured Host header.
     ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')
 
+
+CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=["https://api.progressly.io"])
+
 # ---------------------------------------------------------------------------
 # Multi-tenant setup (django-tenants, schema-based isolation)
 # ---------------------------------------------------------------------------
