@@ -434,3 +434,10 @@ def revoke_api_key(request, key_id: int):
     key.is_active = False
     key.save(update_fields=['is_active'])
     return 204, None
+
+@router.get('/admin/logs', auth=jwt_auth)
+def get_logs(request, limit: int = 200):
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    from shared.log_buffer import get_recent_logs
+    return {'logs': get_recent_logs(limit)}

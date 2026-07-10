@@ -278,12 +278,17 @@ if DEBUG:
         'disable_existing_loggers': False,
         'handlers': {
             'console': {'class': 'logging.StreamHandler'},
+            'ringbuffer': {'class': 'shared.log_buffer.RingBufferHandler'},
         },
         'loggers': {
             'django.db.backends': {
                 'handlers': ['console'],
                 'level': 'DEBUG',
             },
+        },
+        'root': {
+            'handlers': ['console', 'ringbuffer'],
+            'level': 'INFO',
         },
     }
 else:
@@ -300,9 +305,14 @@ else:
                 'class': 'logging.StreamHandler',
                 'formatter': 'json',
             },
+            # Backs GET /auth/admin/logs — see shared/log_buffer.py. Same
+            'ringbuffer': {
+                'class': 'shared.log_buffer.RingBufferHandler',
+                'formatter': 'json',
+            },
         },
         'root': {
-            'handlers': ['console'],
+            'handlers': ['console', 'ringbuffer'],
             'level': 'INFO',
         },
     }
