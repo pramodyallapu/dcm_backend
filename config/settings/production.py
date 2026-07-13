@@ -237,7 +237,7 @@ TENANT_BASE_DOMAIN = env('TENANT_BASE_DOMAIN', default='localhost')
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
-    CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[])
+    CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=['https://api.progressly.io'])
 
 # ---------------------------------------------------------------------------
 # Email
