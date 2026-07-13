@@ -234,11 +234,11 @@ TENANT_BASE_DOMAIN = env('TENANT_BASE_DOMAIN', default='localhost')
 # CORS (configured per environment)
 # ---------------------------------------------------------------------------
 
-if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True
-else:
-    CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=['https://api.progressly.io'])
-
+CORS_ALLOWED_ORIGINS = env.list(
+    'CORS_ALLOWED_ORIGINS',
+    default=['http://localhost:5173', 'http://127.0.0.1:5173','https://app.progressly.io'],
+)
+# CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=['https://api.progressly.io'])
 # ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
