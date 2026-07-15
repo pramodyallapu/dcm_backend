@@ -44,7 +44,11 @@ def decode_token(token: str) -> dict[str, Any]:
 
 
 def token_tenant_mismatch(payload: dict[str, Any], request) -> bool:
-    """Always False — single-tenant deployment, no domain isolation needed."""
+    """Return True if the token was issued for a different tenant than the current request."""
+    token_org_id = payload.get('org_id')
+    request_tenant = getattr(request, 'tenant', None)
+    if token_org_id and request_tenant:
+        return int(token_org_id) != request_tenant.pk
     return False
 
 

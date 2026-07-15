@@ -41,14 +41,10 @@ class CrossOrganizationReferenceError(Exception):
 def current_org_id() -> int:
     org_id = _current_org_id.get()
     if org_id is None:
-        from apps.tenants.models import Organization
-        org = Organization.objects.order_by('id').first()
-        if org is None:
-            raise TenantContextError(
-                'No organization context is set and no Organization exists in the database.'
-            )
-        _current_org_id.set(org.pk)
-        return org.pk
+        raise TenantContextError(
+            'No organization context is set. Tenant-scoped models require '
+            'wrapping the current request/task/command in tenant_context(org_id).'
+        )
     return org_id
 
 

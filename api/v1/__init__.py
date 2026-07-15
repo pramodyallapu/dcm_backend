@@ -30,8 +30,3 @@ api.add_router('/', analytics_router, tags=['Analytics'])
 api.add_router('/', exports_router, tags=['Exports'])
 api.add_router('/', notifications_router, tags=['Notifications'])
 api.add_router('/integrations', integrations_router, tags=['Integrations'])
-
-
-@api.get('/health', auth=None, tags=['System'])
-def health_check(request):
-    return {'status': 'ok', 'version': '1.0.0'}

@@ -66,7 +66,7 @@ if DEBUG:
 
 TENANT_MODEL = 'tenants.Organization'
 TENANT_DOMAIN_MODEL = 'tenants.Domain'
-SHOW_PUBLIC_IF_NO_TENANT_FOUND = True
+SHOW_PUBLIC_IF_NO_TENANT_FOUND = False
 
 # ---------------------------------------------------------------------------
 # Middleware

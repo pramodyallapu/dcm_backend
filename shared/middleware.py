@@ -5,15 +5,45 @@ queries for the first Organization. Sets connection.set_tenant() for schema
 routing and the tenancy contextvar for row-level scoping.
 """
 import base64
+import hashlib
 import json
 import logging
+import time
+import uuid
+from collections import defaultdict
+from threading import Lock
 
 from django.db import connection
+from django.http import JsonResponse
 from apps.tenants.models import Domain, Organization
 
 from .tenancy import tenant_context
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+_RATE_LIMIT_WINDOW = 60   # seconds
+_RATE_LIMIT_MAX    = 10   # max attempts per window
+_rate_store: dict[str, list[float]] = defaultdict(list)
+_rate_lock = Lock()
+
+
+def _is_rate_limited(key: str) -> bool:
+    now = time.monotonic()
+    with _rate_lock:
+        hits = _rate_store[key]
+        # drop hits outside the window
+        _rate_store[key] = [t for t in hits if now - t < _RATE_LIMIT_WINDOW]
+        if len(_rate_store[key]) >= _RATE_LIMIT_MAX:
+            return True
+        _rate_store[key].append(now)
+        return False
+
+
+_RATE_LIMITED_PATHS = {'/api/v1/auth/login', '/api/v1/auth/refresh'}
 
 
 def _org_id_from_jwt(request) -> int | None:
@@ -53,6 +83,17 @@ class TenantResolverMiddleware:
         return self._fallback_org
 
     def __call__(self, request):
+        # Request ID for log correlation
+        request_id = request.META.get('HTTP_X_REQUEST_ID') or str(uuid.uuid4())
+        request.request_id = request_id
+
+        # Rate limit auth endpoints
+        if request.path in _RATE_LIMITED_PATHS:
+            ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '')).split(',')[0].strip()
+            key = hashlib.sha256(f'{request.path}:{ip}'.encode()).hexdigest()[:16]
+            if _is_rate_limited(key):
+                return JsonResponse({'detail': 'Too many requests. Please try again later.'}, status=429)
+
         hostname = request.get_host().split(':')[0]
         request.tenant = None
 
@@ -76,4 +117,6 @@ class TenantResolverMiddleware:
 
         org_id = tenant.pk if tenant else None
         with tenant_context(org_id):
-            return self.get_response(request)
+            response = self.get_response(request)
+            response['X-Request-ID'] = request_id
+            return response

@@ -242,7 +242,11 @@ def me(request):
 
 @router.get('/me/debug', auth=jwt_auth)
 def me_debug(request):
-    """Temporary: shows raw TPMS lookup results for the logged-in user."""
+    """Debug endpoint — admin only."""
+    if not request.user.has_role('admin'):
+        raise HttpError(403, 'Admin access required')
+    if getattr(request, 'tenant', None) and not request.tenant.is_active:
+        raise HttpError(403, 'Forbidden')
     from apps.legacy.models import TpmsEmployee, TpmsAppointment
     from apps.clients.models import Client
 
