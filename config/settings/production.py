@@ -73,7 +73,6 @@ SHOW_PUBLIC_IF_NO_TENANT_FOUND = True
 # ---------------------------------------------------------------------------
 
 MIDDLEWARE = [
-    'django_tenants.middleware.main.TenantMainMiddleware',
     'shared.middleware.TenantResolverMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
