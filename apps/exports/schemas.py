@@ -27,6 +27,7 @@ class ExportCreateRequest(Schema):
     date_to: date | None = None
     target_ids: list[int] = []
     note_id: int | None = None
+    status: str | None = None  # filter by status for notes_csv / sessions_csv
 
 
 class ExportDownloadResponse(Schema):

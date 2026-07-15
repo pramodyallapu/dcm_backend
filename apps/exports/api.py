@@ -14,6 +14,8 @@ _TASK_MAP = {
     'behavior_csv': 'apps.exports.tasks.generate_behavior_csv',
     'abc_csv': 'apps.exports.tasks.generate_abc_csv',
     'raw_zip': 'apps.exports.tasks.generate_raw_zip',
+    'notes_csv': 'apps.exports.tasks.generate_notes_csv',
+    'sessions_csv': 'apps.exports.tasks.generate_sessions_csv',
 }
 
 _VALID_TYPES = set(_TASK_MAP.keys())
@@ -47,6 +49,10 @@ def request_export(request, data: ExportCreateRequest):
         raise HttpError(400, f'{data.export_type} requires program_id')
     if data.export_type == 'abc_csv' and not data.client_id:
         raise HttpError(400, 'abc_csv requires client_id')
+    if data.export_type in ('notes_csv', 'sessions_csv') and not data.client_id:
+        raise HttpError(400, f'{data.export_type} requires client_id')
+    if data.export_type in ('notes_csv', 'sessions_csv') and not data.client_id:
+        raise HttpError(400, f'{data.export_type} requires client_id')
 
     params = data.dict(exclude={'export_type'}, exclude_none=True)
 

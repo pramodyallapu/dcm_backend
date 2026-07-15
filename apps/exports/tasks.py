@@ -311,3 +311,128 @@ def _target_ids_for_program(program_id: int | None) -> list[int]:
         return []
     from apps.programs.models import Target
     return list(Target.objects.filter(program_id=program_id).values_list('id', flat=True))
+
+
+# ---------------------------------------------------------------------------
+# Notes CSV — all notes for a client
+# ---------------------------------------------------------------------------
+
+@shared_task(bind=True, max_retries=2)
+def generate_notes_csv(self, export_id: int):
+    from .models import Export
+    from apps.notes.models import LessonNote
+
+    try:
+        export = Export.objects.get(id=export_id)
+        _mark_processing(export)
+        params = export.params
+
+        qs = LessonNote.objects.filter(
+            external_client_id=params['client_id']
+        ).select_related('staff', 'template').order_by('note_date')
+
+        if params.get('date_from'):
+            qs = qs.filter(note_date__gte=params['date_from'])
+        if params.get('date_to'):
+            qs = qs.filter(note_date__lte=params['date_to'])
+        if params.get('status'):
+            qs = qs.filter(status=params['status'])
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            'note_id', 'note_date', 'status', 'staff_email', 'staff_name',
+            'template_name', 'submitted_at', 'approved_at', 'rejected_at',
+            'rejection_reason', 'session_run_id', 'created_at',
+        ])
+        row_count = 0
+        for note in qs.iterator(chunk_size=500):
+            writer.writerow([
+                note.id,
+                note.note_date,
+                note.status,
+                note.staff.email if note.staff else '',
+                note.staff.full_name if note.staff else '',
+                note.template.name if note.template else '',
+                note.submitted_at.isoformat() if note.submitted_at else '',
+                note.approved_at.isoformat() if note.approved_at else '',
+                note.rejected_at.isoformat() if note.rejected_at else '',
+                note.rejection_reason,
+                note.session_run_id or '',
+                note.created_at.isoformat(),
+            ])
+            row_count += 1
+
+        content = buf.getvalue().encode('utf-8')
+        filename = f'notes_csv_{export_id}_{timezone.now():%Y%m%d_%H%M%S}.csv'
+        path, size = _save_file(content, filename)
+        _mark_completed(export, path, size, row_count)
+
+    except Exception as exc:
+        export = Export.objects.get(id=export_id)
+        _mark_failed(export, str(exc))
+        raise self.retry(exc=exc, countdown=30)
+
+
+# ---------------------------------------------------------------------------
+# Sessions CSV — all sessions for a client
+# ---------------------------------------------------------------------------
+
+@shared_task(bind=True, max_retries=2)
+def generate_sessions_csv(self, export_id: int):
+    from .models import Export
+    from apps.sessions.models import SessionRun, TrialEvent
+    from django.db.models import Count
+
+    try:
+        export = Export.objects.get(id=export_id)
+        _mark_processing(export)
+        params = export.params
+
+        qs = SessionRun.objects.filter(
+            external_client_id=params['client_id']
+        ).select_related('staff').annotate(
+            trial_count=Count('trial_events'),
+            behavior_count=Count('behavior_events'),
+        ).order_by('started_at')
+
+        if params.get('date_from'):
+            qs = qs.filter(started_at__date__gte=params['date_from'])
+        if params.get('date_to'):
+            qs = qs.filter(started_at__date__lte=params['date_to'])
+        if params.get('status'):
+            qs = qs.filter(status=params['status'])
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            'session_id', 'status', 'staff_email', 'staff_name',
+            'started_at', 'ended_at', 'submitted_at', 'reviewed_at',
+            'trial_count', 'behavior_count', 'rejection_reason',
+        ])
+        row_count = 0
+        for session in qs.iterator(chunk_size=500):
+            writer.writerow([
+                session.id,
+                session.status,
+                session.staff.email if session.staff else '',
+                session.staff.full_name if session.staff else '',
+                session.started_at.isoformat(),
+                session.ended_at.isoformat() if session.ended_at else '',
+                session.submitted_at.isoformat() if session.submitted_at else '',
+                session.reviewed_at.isoformat() if session.reviewed_at else '',
+                session.trial_count,
+                session.behavior_count,
+                session.rejection_reason,
+            ])
+            row_count += 1
+
+        content = buf.getvalue().encode('utf-8')
+        filename = f'sessions_csv_{export_id}_{timezone.now():%Y%m%d_%H%M%S}.csv'
+        path, size = _save_file(content, filename)
+        _mark_completed(export, path, size, row_count)
+
+    except Exception as exc:
+        export = Export.objects.get(id=export_id)
+        _mark_failed(export, str(exc))
+        raise self.retry(exc=exc, countdown=30)

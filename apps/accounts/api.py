@@ -1,6 +1,7 @@
 import logging
 import jwt
 from ninja import Router, Body
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 from ninja.errors import HttpError
@@ -214,7 +215,30 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
 
 
 
-@router.post('/refresh', response=AccessTokenResponse, auth=None)
+@router.post('/logout', auth=jwt_auth, response={204: None})
+def logout(request):
+    """Revoke the current access token immediately. Token is blocklisted in Redis until expiry."""
+    from .auth import blocklist_token
+    payload = getattr(request, '_jwt_payload', {})
+    blocklist_token(payload)
+    return 204, None
+
+
+@router.post('/logout-all', auth=jwt_auth, response={204: None})
+def logout_all(request):
+    """
+    Revoke all active tokens for this user by rotating their token secret seed.
+    Achieved by storing a per-user revocation timestamp in Redis — any token
+    issued before this timestamp is rejected.
+    """
+    import redis as redis_lib
+    from django.conf import settings
+    r = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+    r.set(f'dcm:token:revoke_before:{request.user.id}', timezone.now().timestamp(), ex=60 * 60 * 24 * 30)
+    return 204, None
+
+
+
 def refresh_token(request, data: RefreshRequest):
     try:
         payload = decode_token(data.refresh_token)

@@ -55,6 +55,7 @@ TENANT_APPS = [
     'apps.exports',
     'apps.integrations',
     'apps.notifications',
+    'apps.audit',
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [

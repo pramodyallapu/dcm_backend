@@ -87,6 +87,10 @@ class TenantResolverMiddleware:
         request_id = request.META.get('HTTP_X_REQUEST_ID') or str(uuid.uuid4())
         request.request_id = request_id
 
+        # Make request available to audit signals
+        from apps.audit.middleware import set_current_request
+        set_current_request(request)
+
         # Rate limit auth endpoints
         if request.path in _RATE_LIMITED_PATHS:
             ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '')).split(',')[0].strip()
