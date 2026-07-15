@@ -108,11 +108,7 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
     # attempt rather than continuing with a `None` tenant (which would raise
     # an AttributeError below).
     tenant = getattr(request, 'tenant', None)
-    if tenant is None:
-        # No tenant could be resolved from the Host header — reject.
-        raise HttpError(400, 'Tenant not found for this request')
-
-    tenant_tpms_admin_id = tenant.tpms_admin_id
+    tenant_tpms_admin_id = tenant.tpms_admin_id if tenant else None
 
     # Collect candidate records from both tables, then pick the one whose
     # password verifies. A user can exist in admins (practice owner) AND
