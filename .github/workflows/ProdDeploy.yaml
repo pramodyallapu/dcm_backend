@@ -24,11 +24,7 @@ jobs:
             cd ${{ secrets.PROD_PATH }}
             git pull
             source .venv/bin/activate
-            python manage.py migrate_schemas --shared
-            python manage.py create_org \
-              --name "Progressly" \
-              --schema "public" \
-              --domain "api.progressly.io" \
-              --tpms-admin-id 1
             pip install -r requirements/production.txt
+            python manage.py migrate_schemas --shared
+            python manage.py migrate_schemas
             sudo systemctl restart dcm_backend.service
