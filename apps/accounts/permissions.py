@@ -226,12 +226,42 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_maintenance_schedules_create': False,
         'settings_maintenance_schedules_edit': False,
         'settings_maintenance_schedules_delete': False,
-        'settings_workflows_view': False,}}
+        'settings_workflows_view': False,
+        'settings_workflows_create': False,
+        'settings_workflows_edit': False,
+        'settings_workflows_delete': False,
+        'settings_tags_view': False,
+        'settings_tags_create': False,
+        'settings_tags_edit': False,
+        'settings_tags_delete': False,
+        'settings_statuses_view': False,
+        'settings_statuses_create': False,
+        'settings_statuses_edit': False,
+        'settings_statuses_delete': False,
+        'settings_data_fields_view': False,
+        'settings_data_fields_create': False,
+        'settings_data_fields_edit': False,
+        'settings_data_fields_delete': False,
+        # Admin
+        'admin_users_view': False,
+        'admin_users_edit': False,
+        'admin_privileges': False,
+    },
+}
+
+# Organisation-management keys supervisors must retain so they can grant
+# access to staff even if an older privileges save turned them off.
+_SUPERVISOR_ORG_MANAGEMENT_KEYS = (
+    'admin_users_view',
+    'admin_users_edit',
+    'admin_privileges',
+)
+
 
 def get_user_permissions(user: User, organization) -> dict[str, bool]:
     permissions = PERMISSION_DEFAULTS.get(user.role, {}).copy()
     if organization is None:
-        return permissions
+        return _apply_role_guarantees(user.role, permissions)
 
     saved = (
         RolePermission.objects
@@ -241,6 +271,27 @@ def get_user_permissions(user: User, organization) -> dict[str, bool]:
     )
     if isinstance(saved, dict):
         permissions.update({key: bool(value) for key, value in saved.items()})
+
+    return _apply_role_guarantees(user.role, permissions)
+
+
+def _apply_role_guarantees(role: str, permissions: dict[str, bool]) -> dict[str, bool]:
+    """Force always-on permissions that the role must never lose."""
+    if role == User.Role.ADMIN:
+        for key, value in PERMISSION_DEFAULTS.get(User.Role.ADMIN, {}).items():
+            if value:
+                permissions[key] = True
+    elif role == User.Role.SUPERVISOR:
+        for key in _SUPERVISOR_ORG_MANAGEMENT_KEYS:
+            permissions[key] = True
+
+    # Sidebar Settings uses settings_view; grant it whenever any settings
+    # subsection view permission is enabled.
+    if any(
+        key.startswith('settings_') and key.endswith('_view') and key != 'settings_view' and value
+        for key, value in permissions.items()
+    ):
+        permissions['settings_view'] = True
 
     return permissions
 

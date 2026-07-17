@@ -463,13 +463,20 @@ def get_role_permissions(request):
     """Return the full permission matrix as {role: {perm_key: bool}}."""
     require_permission(request, 'admin_privileges')
     from .models import RolePermission
+    from .permissions import PERMISSION_DEFAULTS, _apply_role_guarantees
 
     # Resolve org: either the native org or the tenant from the request
     org = request.user.organization or request.tenant
+    result: dict = {
+        role: dict(defaults)
+        for role, defaults in PERMISSION_DEFAULTS.items()
+    }
     rows = RolePermission.objects.filter(organization=org)
-    result: dict = {}
     for row in rows:
-        result[row.role] = row.permissions
+        merged = {**result.get(row.role, {}), **(row.permissions or {})}
+        result[row.role] = _apply_role_guarantees(row.role, merged)
+    for role in list(result.keys()):
+        result[role] = _apply_role_guarantees(role, result[role])
     return result
 
 
@@ -489,6 +496,20 @@ def save_role_permissions(request, body: dict = Body(...)):
             raise HttpError(400, f'Permissions must be an object for role {role}')
 
     for role, perms in body.items():
+        # Supervisors must retain org-management tools to grant staff access.
+        if role == User.Role.SUPERVISOR:
+            perms = {
+                **perms,
+                'admin_users_view': True,
+                'admin_users_edit': True,
+                'admin_privileges': True,
+            }
+        # Any settings subsection implies Settings page access in the sidebar.
+        if any(
+            key.startswith('settings_') and key.endswith('_view') and key != 'settings_view' and bool(value)
+            for key, value in perms.items()
+        ):
+            perms = {**perms, 'settings_view': True}
         RolePermission.objects.update_or_create(
             organization=org,
             role=role,
