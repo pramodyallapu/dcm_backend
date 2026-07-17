@@ -105,14 +105,14 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'sessions_view': True,
         'sessions_create': True,
         'sessions_edit': True,
-        'sessions_delete': False,
+        'sessions_delete': True,
         'session_start': True,
         'session_approve': True,
         # Notes
         'notes_view': True,
         'notes_create': True,
         'notes_edit': True,
-        'notes_delete': False,
+        'notes_delete': True,
         'note_submit': True,
         'note_approve': True,
         # Review queue
@@ -121,7 +121,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'templates_view': True,
         'templates_create': True,
         'templates_edit': True,
-        'templates_delete': False,
+        'templates_delete': True,
         # Org programs
         'org_programs_view': False,
         'org_programs_create': False,
@@ -162,9 +162,9 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
         'settings_data_fields_edit': False,
         'settings_data_fields_delete': False,
         # Admin
-        'admin_users_view': False,
-        'admin_users_edit': False,
-        'admin_privileges': False,
+        'admin_users_view': True,
+        'admin_users_edit': True,
+        'admin_privileges': True,
     },
     User.Role.STAFF: {
         # Dashboard
