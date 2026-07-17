@@ -10,7 +10,7 @@ from django.db.models import Q
 
 from .models import User, APIKey
 from .auth import create_access_token, create_refresh_token, decode_token, jwt_auth, token_tenant_mismatch
-from .permissions import get_user_permissions
+from .permissions import get_user_permissions, require_permission
 from .schemas import (
     LoginRequest,
     TokenResponse,
@@ -461,8 +461,7 @@ def get_logs(request, limit: int = 200):
 @router.get('/admin/role-permissions', auth=jwt_auth)
 def get_role_permissions(request):
     """Return the full permission matrix as {role: {perm_key: bool}}."""
-    if not request.user.has_role('admin'):
-        raise HttpError(403, 'Admin access required')
+    require_permission(request, 'admin_privileges')
     from .models import RolePermission
 
     # Resolve org: either the native org or the tenant from the request
@@ -477,8 +476,7 @@ def get_role_permissions(request):
 @router.put('/admin/role-permissions', auth=jwt_auth)
 def save_role_permissions(request, body: dict = Body(...)):
     """Save the full permission matrix.  Body: {role: {perm_key: bool}}."""
-    if not request.user.has_role('admin'):
-        raise HttpError(403, 'Admin access required')
+    require_permission(request, 'admin_privileges')
     from .models import RolePermission
 
     org = request.user.organization or request.tenant
