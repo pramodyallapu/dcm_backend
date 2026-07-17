@@ -167,6 +167,13 @@ JWT_ACCESS_TOKEN_EXPIRE_MINUTES = env.int('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', def
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = env.int('JWT_REFRESH_TOKEN_EXPIRE_DAYS', default=7)
 
 # ---------------------------------------------------------------------------
+# TherapyPMS HTTP API (auth — encrypt → login; no direct DB password checks)
+# ---------------------------------------------------------------------------
+
+TPMS_API_BASE_URL = env('TPMS_API_BASE_URL', default='https://app.therapypms.com')
+TPMS_API_TIMEOUT_SECONDS = env.int('TPMS_API_TIMEOUT_SECONDS', default=20)
+
+# ---------------------------------------------------------------------------
 # DocuSeal SSO
 # ---------------------------------------------------------------------------
 

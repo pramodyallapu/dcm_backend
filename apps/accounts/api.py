@@ -26,28 +26,18 @@ from .schemas import (
     ErrorResponse,
     StaffSchema,
 )
-
-# ---------------------------------------------------------------------------
-# TherapyPMS bcrypt helper
-# ---------------------------------------------------------------------------
-
-def _verify_tpms_password(plain: str, hashed: str | None) -> bool:
-    """Verify a Laravel bcrypt hash ($2y$ or $2a$) against a plain-text password."""
-    if not hashed:
-        return False
-    try:
-        import bcrypt
-        # uses $2y$; older PHP used $2a$. Python bcrypt expects $2b$.
-        normalized = hashed.replace('$2y$', '$2b$', 1).replace('$2a$', '$2b$', 1).encode()
-        result = bcrypt.checkpw(plain.encode(), normalized)
-        return result
-    except Exception as e:
-        logger.warning('bcrypt verification error: %s | hash prefix: %s', e, hashed[:7] if hashed else None)
-        return False
+from apps.integrations.tpms_auth_client import (
+    TpmsAuthError,
+    authenticate as tpms_authenticate,
+    clear_tpms_access_token,
+    store_tpms_access_token,
+)
 
 
-def _tpms_role_for_employee_type(employee_type: str | None) -> str:
-    """Map a TPMS employee_type string to a DCM role."""
+def _tpms_role_for_employee_type(employee_type: str | None, *, is_admin: bool = False) -> str:
+    """Map a TPMS employee_type / admin flag to a DCM role."""
+    if is_admin:
+        return User.Role.ADMIN
     if not employee_type:
         return User.Role.STAFF
     et = employee_type.lower()
@@ -71,119 +61,91 @@ def _issue_tokens(user: User, tenant_id: int) -> TokenResponse:
 
 @router.post('/login', response=TokenResponse, auth=None)
 def login(request, data: LoginRequest):
-    # Native (non-TPMS) users: a real password, bound to this request's tenant.
-    # TPMS-provisioned users always have set_unusable_password() called on
-    # them, so they can never match this branch — it's purely additive.
-    native_user = User.objects.filter(email=data.email, organization=request.tenant).first()
-    if native_user and native_user.has_usable_password() and native_user.check_password(data.password):
-        if not native_user.is_active:
-            raise HttpError(403, 'Account is inactive')
-        tenant_id = request.tenant.pk if getattr(request, 'tenant', None) else 0
-        return _issue_tokens(native_user, tenant_id)
+    """
+    Authenticate exclusively via TherapyPMS HTTP APIs (encrypt → login).
 
-    # Otherwise authenticate against TPMS — no manual DCM user creation needed.
-    # A DCM user record is auto-provisioned transparently on first login so the
-    # JWT system has a user object to reference. The issued token is still
-    # bound to *this* request's tenant, same as the native path above.
+    No DCM local-password check and no direct TherapyPMS database password
+    verification. A DCM User row is auto-provisioned so JWTs have a subject.
+    """
     return _tpms_auth(request, data.email, data.password)
 
 
-def _tpms_effective_admin_id(admin) -> int:
-    """
-    Mirror TPMS login logic: is_up_admin=1 means this is the top-level practice
-    owner — use their own id. is_up_admin=0 means sub-admin — use up_admin_id
-    (the parent practice owner's id) so data scoping matches TPMS exactly.
-    """
-    if admin.is_up_admin == 1:
-        return admin.id
-    return admin.up_admin_id or admin.id
-
-
 def _tpms_auth(request, email: str, password: str) -> TokenResponse:
-    """Verify credentials against TPMS admins/employees and return a DCM token."""
-    from apps.legacy.models import TpmsAdmin, TpmsEmployee
-    from django.db.models import Q
-
-    # Only match TPMS records belonging to the practice mapped to this tenant.
-    # request.tenant is resolved purely from the Host header (see
-    # shared/middleware.py). If no tenant was resolved, reject the login
-    # attempt rather than continuing with a `None` tenant (which would raise
-    # an AttributeError below).
+    """Verify credentials via TherapyPMS iOS encrypt/login APIs and issue a DCM token."""
     tenant = getattr(request, 'tenant', None)
-    tenant_tpms_admin_id = tenant.tpms_admin_id if tenant else None
-
-    # Collect candidate records from both tables, then pick the one whose
-    # password verifies. A user can exist in admins (practice owner) AND
-    # employees (provider) — we must try both.
-    candidates: list[dict] = []
-
-    try:
-        admin = TpmsAdmin.objects.using('therapypms').get(
-            Q(email=email) | Q(login_email=email)
-        )
-        if admin.password and (tenant_tpms_admin_id is None or _tpms_effective_admin_id(admin) == tenant_tpms_admin_id):
-            candidates.append({
-                'hashed_password': admin.password,
-                'is_active': bool(admin.active),
-                'first_name': admin.first_name or admin.name or '',
-                'last_name': admin.last_name or '',
-                'dcm_role': User.Role.ADMIN,
-                'external_admin_id': _tpms_effective_admin_id(admin),
-            })
-    except TpmsAdmin.DoesNotExist:
-        pass
-    except TpmsAdmin.MultipleObjectsReturned:
-        for admin in TpmsAdmin.objects.using('therapypms').filter(
-            Q(email=email) | Q(login_email=email)
-        ):
-            if admin.password and (tenant_tpms_admin_id is None or _tpms_effective_admin_id(admin) == tenant_tpms_admin_id):
-                candidates.append({
-                    'hashed_password': admin.password,
-                    'is_active': bool(admin.active),
-                    'first_name': admin.first_name or admin.name or '',
-                    'last_name': admin.last_name or '',
-                    'dcm_role': User.Role.ADMIN,
-                    'external_admin_id': _tpms_effective_admin_id(admin),
-                })
-
-    external_employee_id: int | None = None
-    try:
-        employee = TpmsEmployee.objects.using('therapypms').get(login_email=email)
-        if employee.password and (tenant_tpms_admin_id is None or employee.admin_id == tenant_tpms_admin_id):
-            external_employee_id = employee.id
-            candidates.append({
-                'hashed_password': employee.password,
-                'is_active': bool(employee.is_staff_active or employee.is_active),
-                'first_name': employee.first_name or '',
-                'last_name': employee.last_name or '',
-                'dcm_role': _tpms_role_for_employee_type(employee.employee_type),
-                'external_admin_id': employee.admin_id,
-            })
-    except TpmsEmployee.DoesNotExist:
-        pass
-
-    # Try each candidate in order — first password match wins
-    matched = next(
-        (c for c in candidates if _verify_tpms_password(password, c['hashed_password'])),
-        None,
+    print(f'[DCM LOGIN] email={email!r} password_len={len(password)}')
+    print(
+        f'[DCM LOGIN] tenant={getattr(tenant, "schema_name", None)!r} '
+        f'tpms_admin_id={getattr(tenant, "tpms_admin_id", None)!r}'
     )
-
-    if matched is None:
+    if tenant is None:
+        print('[DCM LOGIN] ✗ reject: no tenant resolved from Host')
         raise HttpError(401, 'Invalid email or password')
 
-    first_name  = matched['first_name']
-    last_name   = matched['last_name']
-    dcm_role    = matched['dcm_role']
-    is_active   = matched['is_active']
-    external_admin_id = matched['external_admin_id']
+    tenant_tpms_admin_id = tenant.tpms_admin_id
+    if tenant_tpms_admin_id is None:
+        # Fail closed — without a practice mapping we cannot safely scope the session.
+        print('[DCM LOGIN] ✗ reject: tenant.tpms_admin_id is not set')
+        raise HttpError(401, 'Invalid email or password')
 
-    if not is_active:
+    try:
+        print('[DCM LOGIN] calling TherapyPMS API (encrypt → login) …')
+        profile = tpms_authenticate(email, password)
+    except TpmsAuthError as exc:
+        message = str(exc) or 'Invalid email or password'
+        print(f'[DCM LOGIN] ✗ TPMS auth error: {message!r} payload={getattr(exc, "payload", None)}')
+        if 'unavailable' in message.lower() or 'invalid response' in message.lower():
+            raise HttpError(502, message) from exc
+        raise HttpError(401, 'Invalid email or password') from exc
+
+    if not profile.is_active:
+        print('[DCM LOGIN] ✗ reject: TPMS profile is inactive')
         raise HttpError(403, 'Account is inactive')
 
-    # Auto-provision DCM user on first TPMS login; keep external_admin_id + external_employee_id current
+    external_admin_id = profile.external_admin_id
+    if external_admin_id is None:
+        # Returning users may already have practice scope stored on the DCM User
+        # row from a prior login that included practice fields in the TPMS payload.
+        existing = User.objects.filter(email__iexact=profile.email or email).first()
+        if existing and existing.external_admin_id is not None:
+            external_admin_id = existing.external_admin_id
+            print(f'[DCM LOGIN] practice id missing in TPMS payload; using stored user.external_admin_id={external_admin_id}')
+        else:
+            print(
+                '[DCM LOGIN] ✗ reject: TPMS login OK but practice id missing; '
+                f'raw keys={sorted(profile.raw.keys()) if isinstance(profile.raw, dict) else type(profile.raw)} '
+                f'raw={profile.raw}'
+            )
+            logger.warning(
+                'TPMS login succeeded but practice id missing for email=%s keys=%s',
+                email,
+                sorted(profile.raw.keys()) if isinstance(profile.raw, dict) else type(profile.raw),
+            )
+            raise HttpError(401, 'Invalid email or password')
+
+    # Tenant binding (C-01): only accept users belonging to this org's practice.
+    if external_admin_id != tenant_tpms_admin_id:
+        print(
+            f'[DCM LOGIN] ✗ reject: practice mismatch '
+            f'tpms_admin_id={external_admin_id} != tenant.tpms_admin_id={tenant_tpms_admin_id}'
+        )
+        raise HttpError(401, 'Invalid email or password')
+
+    print(f'[DCM LOGIN] ✓ practice match admin_id={external_admin_id}; issuing DCM JWT')
+
+    dcm_role = _tpms_role_for_employee_type(
+        profile.employee_type,
+        is_admin=profile.is_admin,
+    )
+    first_name = profile.first_name or ''
+    last_name = profile.last_name or ''
+    external_employee_id = profile.external_employee_id
+    provision_email = profile.email or email
+
+    # Auto-provision DCM user on first TPMS login; keep external ids + role current.
     with transaction.atomic():
         user, created = User.objects.get_or_create(
-            email=email,
+            email=provision_email,
             defaults={
                 'first_name': first_name,
                 'last_name': last_name,
@@ -198,6 +160,12 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
             user.save(update_fields=['password'])
         else:
             update_fields = []
+            if first_name and user.first_name != first_name:
+                user.first_name = first_name
+                update_fields.append('first_name')
+            if last_name and user.last_name != last_name:
+                user.last_name = last_name
+                update_fields.append('last_name')
             if user.external_admin_id != external_admin_id:
                 user.external_admin_id = external_admin_id
                 update_fields.append('external_admin_id')
@@ -207,11 +175,18 @@ def _tpms_auth(request, email: str, password: str) -> TokenResponse:
             if user.role != dcm_role:
                 user.role = dcm_role
                 update_fields.append('role')
+            if not user.is_active:
+                user.is_active = True
+                update_fields.append('is_active')
             if update_fields:
                 user.save(update_fields=update_fields)
 
-    tenant_id = request.tenant.pk if getattr(request, 'tenant', None) else 0
-    return _issue_tokens(user, tenant_id)
+    if profile.access_token:
+        store_tpms_access_token(user.id, profile.access_token)
+    else:
+        print('[DCM LOGIN] ⚠ TPMS login OK but access_token missing from payload')
+
+    return _issue_tokens(user, tenant.pk)
 
 
 
@@ -221,6 +196,7 @@ def logout(request):
     from .auth import blocklist_token
     payload = getattr(request, '_jwt_payload', {})
     blocklist_token(payload)
+    clear_tpms_access_token(request.user.id)
     return 204, None
 
 
@@ -235,6 +211,7 @@ def logout_all(request):
     from django.conf import settings
     r = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
     r.set(f'dcm:token:revoke_before:{request.user.id}', timezone.now().timestamp(), ex=60 * 60 * 24 * 30)
+    clear_tpms_access_token(request.user.id)
     return 204, None
 
 

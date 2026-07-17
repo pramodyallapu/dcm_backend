@@ -1,9 +1,18 @@
-from datetime import date
+from datetime import date, datetime
+from typing import Any
+
 from ninja import Router
 from ninja.errors import HttpError
 from django.db.models import Q, Count
 
 from apps.accounts.auth import jwt_auth
+from apps.integrations.tpms_auth_client import (
+    TpmsAuthError,
+    clear_tpms_access_token,
+    get_tpms_access_token,
+    list_patients,
+    list_recurring_appointments,
+)
 from apps.sessions.schemas import AppointmentSchema
 from .models import Client, ClientStaffAssignment
 from .schemas import (
@@ -85,104 +94,286 @@ def _list_native_clients(request, include_inactive: bool, search: str | None) ->
     return list(qs.order_by('last_name', 'first_name'))
 
 
-@router.get('', response=list[ClientSchema])
-def list_clients(request, include_inactive: bool = False, search: str | None = None):
-    """
-    Returns patients scoped to the logged-in user's TPMS practice.
+def _dig_patient(data: dict[str, Any], *keys: str) -> Any:
+    def norm(value: str) -> str:
+        return ''.join(ch for ch in value.lower() if ch.isalnum())
 
-    Mirrors the TherapyPMS pattern: reads live from the TPMS clients table
-    filtered by admin_id, then auto-creates DCM Client records for any not yet
-    synced so that programs/sessions can link against a stable DCM id.
+    for key in keys:
+        if key in data and data[key] not in (None, ''):
+            return data[key]
+        normalized = norm(key)
+        for existing, value in data.items():
+            if norm(existing) == normalized and value not in (None, ''):
+                return value
+    for nested_key in ('client', 'patient', 'user', 'profile'):
+        nested = data.get(nested_key)
+        if isinstance(nested, dict):
+            value = _dig_patient(nested, *keys)
+            if value not in (None, ''):
+                return value
+    return None
 
-    - Admin/supervisor: all patients in their practice.
-    - Staff: only patients they have been explicitly assigned to.
-    """
-    if request.user.external_admin_id is None:
-        return _list_native_clients(request, include_inactive, search)
 
-    from apps.legacy.models import TpmsClient
+def _split_patient_name(value: Any) -> tuple[str, str]:
+    text = str(value or '').strip()
+    if not text:
+        return '', ''
+    if ',' in text:
+        last, first = [part.strip() for part in text.split(',', 1)]
+        return first, last
+    parts = text.split(' ', 1)
+    return parts[0], parts[1] if len(parts) > 1 else ''
 
-    tpms_qs = TpmsClient.objects.using('therapypms').filter(
-        admin_id=request.user.external_admin_id,
+
+def _parse_patient_dob(value: Any) -> date | None:
+    if value is None or value == '':
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], '%Y-%m-%d').date()
+    except ValueError:
+        pass
+    for fmt in ('%m/%d/%Y', '%Y/%m/%d'):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00')).date()
+    except ValueError:
+        return None
+
+
+def _patient_is_active(patient: dict[str, Any]) -> bool:
+    raw = _dig_patient(
+        patient,
+        'patient_active_status',
+        'is_active_client',
+        'is_active',
+        'active',
+        'status',
+        'client_status',
     )
-    if not include_inactive:
-        tpms_qs = tpms_qs.filter(is_active_client=1)
-    if search:
-        tpms_qs = tpms_qs.filter(
-            Q(client_first_name__icontains=search)
-            | Q(client_last_name__icontains=search)
-            | Q(client_full_name__icontains=search)
-        )
-    tpms_clients = list(tpms_qs.order_by('client_last_name', 'client_first_name'))
+    if raw is None:
+        return True
+    if isinstance(raw, (int, float)):
+        return int(raw) != 0
+    text = str(raw).strip().lower()
+    # TherapyPMS iOS list uses labels like "Active", "On-Hold", "Wait-List".
+    if text in {'active', '1', 'true', 'yes'}:
+        return True
+    if text in {
+        '0', 'false', 'inactive', 'discharged', 'disabled', 'no',
+        'on-hold', 'on hold', 'wait-list', 'waitlist', 'pending approval',
+        'leaving soon', 'deleted',
+    }:
+        return False
+    return True
 
-    if not tpms_clients:
+
+def _map_patient_fields(patient: dict[str, Any], *, fallback_admin_id: int | None) -> dict[str, Any] | None:
+    ext_id = _dig_patient(patient, 'patient_id', 'id', 'client_id', 'patientid', 'clientid')
+    if ext_id is None:
+        return None
+
+    first = str(
+        _dig_patient(
+            patient,
+            'client_first_name',
+            'client_firstname',
+            'clientFirstName',
+            'patient_first_name',
+            'patientFirstName',
+            'first_name',
+            'firstname',
+            'fname',
+        ) or ''
+    ).strip()
+    last = str(
+        _dig_patient(
+            patient,
+            'client_last_name',
+            'client_lastname',
+            'clientLastName',
+            'patient_last_name',
+            'patientLastName',
+            'last_name',
+            'lastname',
+            'lname',
+        ) or ''
+    ).strip()
+    if not first and not last:
+        first, last = _split_patient_name(
+            _dig_patient(
+                patient,
+                'client_full_name',
+                'clientFullName',
+                'patient_full_name',
+                'patientFullName',
+                'patient_name',
+                'patientName',
+                'client_name',
+                'clientName',
+                'full_name',
+                'fullname',
+                'display_name',
+                'name',
+            )
+        )
+
+    admin_raw = _dig_patient(patient, 'admin_id', 'adminId', 'facility_id')
+    try:
+        admin_id = int(admin_raw) if admin_raw is not None else fallback_admin_id
+    except (TypeError, ValueError):
+        admin_id = fallback_admin_id
+
+    return {
+        'external_id': str(ext_id),
+        'first_name': first or 'Unknown',
+        'last_name': last or 'Unknown',
+        'preferred_name': str(
+            _dig_patient(
+                patient,
+                'client_preferred',
+                'clientPreferred',
+                'preferred_name',
+                'preferredName',
+                'nickname',
+            ) or ''
+        ).strip(),
+        'date_of_birth': _parse_patient_dob(
+            _dig_patient(
+                patient,
+                'client_dob',
+                'clientDob',
+                'patient_dob',
+                'patientDob',
+                'date_of_birth',
+                'dateOfBirth',
+                'dob',
+            )
+        ),
+        'status': Client.Status.ACTIVE if _patient_is_active(patient) else Client.Status.INACTIVE,
+        'external_admin_id': admin_id,
+        'is_active': _patient_is_active(patient),
+    }
+
+
+def _upsert_clients_from_patients(
+    patients: list[dict[str, Any]],
+    *,
+    fallback_admin_id: int | None,
+    include_inactive: bool,
+    search: str | None,
+) -> list[Client]:
+    mapped: list[dict[str, Any]] = []
+    for patient in patients:
+        fields = _map_patient_fields(patient, fallback_admin_id=fallback_admin_id)
+        if fields is None:
+            continue
+        if not include_inactive and not fields['is_active']:
+            continue
+        if search:
+            needle = search.lower()
+            hay = f"{fields['first_name']} {fields['last_name']} {fields['preferred_name']}".lower()
+            if needle not in hay:
+                continue
+        mapped.append(fields)
+
+    unknown_ext_ids = [
+        row['external_id']
+        for row in mapped
+        if row['first_name'] == 'Unknown' or row['last_name'] == 'Unknown'
+    ]
+    if unknown_ext_ids:
+        try:
+            from apps.legacy.models import TpmsClient
+
+            tpms_names = {
+                str(client.pk): client
+                for client in TpmsClient.objects.using('therapypms').filter(pk__in=unknown_ext_ids)
+            }
+            for row in mapped:
+                tpms_client = tpms_names.get(row['external_id'])
+                if tpms_client is None:
+                    continue
+                first = (tpms_client.client_first_name or '').strip()
+                last = (tpms_client.client_last_name or '').strip()
+                if not first and not last:
+                    first, last = _split_patient_name(tpms_client.client_full_name)
+                row['first_name'] = first or row['first_name']
+                row['last_name'] = last or row['last_name']
+                row['preferred_name'] = row['preferred_name'] or (tpms_client.client_preferred or '').strip()
+                row['date_of_birth'] = row['date_of_birth'] or tpms_client.client_dob
+        except Exception:
+            pass
+
+    mapped.sort(key=lambda row: (row['last_name'].lower(), row['first_name'].lower()))
+    if not mapped:
         return []
 
-    # Resolve external_id → DCM Client in one query
-    ext_ids = [str(tc.pk) for tc in tpms_clients]
+    ext_ids = [row['external_id'] for row in mapped]
     existing = {
         c.external_id: c
         for c in Client.objects.filter(external_id__in=ext_ids)
     }
 
-    # For staff: show only clients they have TPMS appointments with
-    if request.user.role not in ('admin', 'supervisor'):
-        from apps.legacy.models import TpmsAppointment
-        employee_id = request.user.external_employee_id
-        if not employee_id:
-            return []
-        external_client_ids = (
-            TpmsAppointment.objects.using('therapypms')
-            .filter(provider_id=employee_id)
-            .exclude(status__in=['deleted', 'void', 'voided'])
-            .exclude(client_id__isnull=True)
-            .values_list('client_id', flat=True)
-            .distinct()
-        )
-        assigned_ext_ids = {str(cid) for cid in external_client_ids}
-        tpms_clients = [tc for tc in tpms_clients if str(tc.pk) in assigned_ext_ids]
-
-    result = []
-    for tc in tpms_clients:
-        ext_id = str(tc.pk)
+    result: list[Client] = []
+    for fields in mapped:
+        fields = {k: v for k, v in fields.items() if k != 'is_active'}
+        ext_id = fields['external_id']
         dcm_client = existing.get(ext_id)
-
-        # Resolve best available name from TPMS fields
-        first = (tc.client_first_name or '').strip()
-        last  = (tc.client_last_name  or '').strip()
-        if not first and not last:
-            full = (tc.client_full_name or '').strip()
-            parts = full.split(' ', 1)
-            first = parts[0] if parts else 'Unknown'
-            last  = parts[1] if len(parts) > 1 else ''
-        first = first or 'Unknown'
-        last  = last  or 'Unknown'
-
         if dcm_client is None:
-            dcm_client = Client.objects.create(
-                external_id=ext_id,
-                first_name=first,
-                last_name=last,
-                preferred_name=(tc.client_preferred or '').strip(),
-                date_of_birth=tc.client_dob,
-                status=Client.Status.ACTIVE,
-                external_admin_id=tc.admin_id,
-            )
+            dcm_client = Client.objects.create(**fields)
+            existing[ext_id] = dcm_client
         else:
-            # Always keep names in sync with TPMS
             update_fields = []
-            if dcm_client.first_name != first:
-                dcm_client.first_name = first
-                update_fields.append('first_name')
-            if dcm_client.last_name != last:
-                dcm_client.last_name = last
-                update_fields.append('last_name')
+            for attr in ('first_name', 'last_name', 'preferred_name', 'date_of_birth', 'status', 'external_admin_id'):
+                value = fields.get(attr)
+                if value is not None and getattr(dcm_client, attr) != value:
+                    setattr(dcm_client, attr, value)
+                    update_fields.append(attr)
             if update_fields:
                 dcm_client.save(update_fields=update_fields)
-
         result.append(dcm_client)
-
     return result
+
+
+@router.get('', response=list[ClientSchema])
+def list_clients(request, include_inactive: bool = False, search: str | None = None):
+    """
+    Returns patients scoped to the logged-in user's TherapyPMS session.
+
+    Uses GET /api/v1/ios/patient/list with the TPMS Bearer token captured at
+    login, then upserts DCM Client rows so programs/sessions keep a stable id.
+    """
+    if request.user.external_admin_id is None:
+        return _list_native_clients(request, include_inactive, search)
+
+    token = get_tpms_access_token(request.user.id)
+    if not token:
+        raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
+
+    try:
+        patients = list_patients(token, search=search)
+    except TpmsAuthError as exc:
+        if exc.status_code in {401, 403}:
+            clear_tpms_access_token(request.user.id)
+            raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
+        raise HttpError(502, str(exc) or 'Failed to load patients from TherapyPMS') from exc
+
+    return _upsert_clients_from_patients(
+        patients,
+        fallback_admin_id=request.user.external_admin_id,
+        include_inactive=include_inactive,
+        search=search,
+    )
 
 
 @router.post('', response={201: ClientSchema})
@@ -272,6 +463,257 @@ def _tpms_status(raw: str | None) -> str:
     return 'scheduled'
 
 
+def _dig_appointment(data: dict[str, Any], *keys: str) -> Any:
+    def norm(value: str) -> str:
+        return ''.join(ch for ch in value.lower() if ch.isalnum())
+
+    for key in keys:
+        if key in data and data[key] not in (None, ''):
+            return data[key]
+        normalized = norm(key)
+        for existing, value in data.items():
+            if norm(existing) == normalized and value not in (None, ''):
+                return value
+    for nested_key in ('appointment', 'recurring_appointment', 'session'):
+        nested = data.get(nested_key)
+        if isinstance(nested, dict):
+            value = _dig_appointment(nested, *keys)
+            if value not in (None, ''):
+                return value
+    return None
+
+
+def _parse_appointment_datetime(value: Any) -> datetime | None:
+    if value is None or value == '':
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        pass
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d', '%m/%d/%Y %H:%M:%S', '%m/%d/%Y'):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_appointment_date_only(value: Any) -> date | None:
+    parsed = _parse_appointment_datetime(value)
+    if parsed is not None:
+        return parsed.date()
+    return None
+
+
+def _parse_clock_time(value: str) -> tuple[int, int] | None:
+    """Parse a clock string like '10:00 am' into (hour, minute)."""
+    text = str(value or '').strip().lower()
+    if not text:
+        return None
+    for fmt in ('%I:%M %p', '%I %p', '%H:%M', '%I:%M%p'):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.hour, parsed.minute
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_hours_range(value: Any) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+    """Parse '10:00 am to 12:30 pm' into ((10,0), (12,30))."""
+    text = str(value or '').strip()
+    if not text:
+        return None, None
+    lowered = text.lower()
+    sep = ' to ' if ' to ' in lowered else ('-' if '-' in text else None)
+    if sep is None:
+        return _parse_clock_time(text), None
+    left, _, right = text.partition(' to ') if sep == ' to ' else text.partition('-')
+    return _parse_clock_time(left), _parse_clock_time(right)
+
+
+def _strip_html(value: Any) -> str:
+    import re
+
+    text = str(value or '')
+    text = re.sub(r'<[^>]+>', '', text)
+    text = text.replace('&laquo;', '').replace('&raquo;', '')
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _appointment_service_name(appt: dict[str, Any]) -> str:
+    direct = _dig_appointment(
+        appt,
+        'activity_type',
+        'service_type',
+        'activity_name',
+        'authorization_activity_name',
+        'service_hour',
+    )
+    if direct:
+        return _strip_html(direct)
+
+    service_list = _dig_appointment(appt, 'service_list', 'services')
+    if isinstance(service_list, list) and service_list:
+        joined = ', '.join(_strip_html(item) for item in service_list if item)
+        if joined:
+            return joined
+
+    cpt = _dig_appointment(appt, 'cpt_code')
+    return _strip_html(cpt) if cpt else ''
+
+
+def _serialize_tpms_api_appointments(
+    *,
+    appointments: list[dict[str, Any]],
+    dcm_client_id: int,
+    status: str | None,
+    from_date: date | None,
+    to_date: date | None,
+) -> list[dict[str, Any]]:
+    from django.utils import timezone as tz
+    from apps.sessions.models import Appointment as DcmAppointment
+
+    def _aware(dt: datetime | None):
+        if dt is None:
+            return None
+        return tz.make_aware(dt) if tz.is_naive(dt) else dt
+
+    ext_ids = [
+        str(_dig_appointment(
+            appt, 'session_id', 'id', 'appointment_id', 'recurring_appointment_id',
+            'recurring_session_id',
+        ) or '')
+        for appt in appointments
+    ]
+    ext_ids = [ext_id for ext_id in ext_ids if ext_id]
+    dcm_by_ext: dict[str, DcmAppointment] = {}
+    if ext_ids:
+        for dcm in (
+            DcmAppointment.objects
+            .filter(external_id__in=ext_ids)
+            .annotate(_program_count=Count('lesson__lesson_programs', distinct=True))
+        ):
+            dcm_by_ext[dcm.external_id] = dcm
+
+    results: list[dict[str, Any]] = []
+    for appt in appointments:
+        raw_status = str(_dig_appointment(appt, 'status', 'appointment_status') or '')
+        if raw_status.lower() in _TPMS_EXCLUDED_STATUSES:
+            continue
+
+        mapped_status = _tpms_status(raw_status)
+        if status and mapped_status != status:
+            continue
+
+        start = _parse_appointment_datetime(
+            _dig_appointment(
+                appt,
+                'from_time',
+                'start_time',
+                'appointment_start_time',
+                'schedule_from',
+            )
+        )
+        if start is None:
+            schedule_date = _parse_appointment_date_only(
+                _dig_appointment(
+                    appt,
+                    'start_date',
+                    'schedule_date',
+                    'appointment_date',
+                    'session_date',
+                    'date',
+                )
+            )
+            if schedule_date is not None:
+                from_hm, to_hm = _parse_hours_range(_dig_appointment(appt, 'hours', 'time'))
+                if from_hm is not None:
+                    start = datetime(
+                        schedule_date.year, schedule_date.month, schedule_date.day,
+                        from_hm[0], from_hm[1],
+                    )
+                else:
+                    start = datetime(schedule_date.year, schedule_date.month, schedule_date.day)
+
+        if start is None:
+            continue
+
+        end = _parse_appointment_datetime(
+            _dig_appointment(appt, 'to_time', 'end_time', 'appointment_end_time', 'schedule_to')
+        )
+        if end is None:
+            _, to_hm = _parse_hours_range(_dig_appointment(appt, 'hours', 'time'))
+            if to_hm is not None:
+                end = datetime(start.year, start.month, start.day, to_hm[0], to_hm[1])
+        if end is None:
+            end = start
+
+        if from_date and start.date() < from_date:
+            continue
+        if to_date and start.date() > to_date:
+            continue
+
+        duration_raw = _dig_appointment(appt, 'time_duration', 'duration_minutes', 'duration')
+        duration_mins = 0
+        if duration_raw not in (None, ''):
+            try:
+                duration_mins = int(duration_raw)
+            except (TypeError, ValueError):
+                duration_mins = 0
+        if not duration_mins and end > start:
+            duration_mins = int((end - start).total_seconds() / 60)
+
+        ext_id = str(
+            _dig_appointment(
+                appt, 'session_id', 'id', 'appointment_id', 'recurring_appointment_id',
+                'recurring_session_id',
+            ) or ''
+        )
+        if not ext_id:
+            continue
+
+        provider_id = _dig_appointment(appt, 'provider_id', 'providerId', 'employee_id')
+        try:
+            staff_id = int(provider_id) if provider_id is not None else None
+        except (TypeError, ValueError):
+            staff_id = None
+
+        service_name = _appointment_service_name(appt)
+        dcm = dcm_by_ext.get(ext_id)
+        results.append({
+            'id': dcm.id if dcm else int(ext_id) if ext_id.isdigit() else 0,
+            'client_id': dcm_client_id,
+            'staff_id': staff_id,
+            'staff_name': str(_dig_appointment(appt, 'provider_name', 'staff_name', 'employee_name') or '') or None,
+            'lesson_id': dcm.lesson_id if dcm else None,
+            'assigned_program_count': dcm._program_count if dcm else 0,
+            'external_id': ext_id,
+            'source': 'tpms',
+            'start_time': _aware(start),
+            'end_time': _aware(end),
+            'service_type': service_name,
+            'location': str(_dig_appointment(appt, 'location', 'pos', 'place_of_service') or '') or None,
+            'duration_minutes': duration_mins,
+            'notes': str(_dig_appointment(appt, 'notes', 'note') or ''),
+            'status': mapped_status,
+            'synced_at': None,
+            'created_at': _aware(
+                _parse_appointment_datetime(_dig_appointment(appt, 'created_at'))
+            ) or _aware(start),
+        })
+
+    results.sort(key=lambda row: row['start_time'], reverse=True)
+    return results
+
+
 def _list_native_client_sessions(
     request,
     client: Client,
@@ -307,127 +749,48 @@ def list_client_sessions(
     to_date: date | None = None,
 ):
     """
-    Return appointments for a client, fetched live from the TPMS appoinments
-    table using the client's external_id as the TPMS client_id.
+    Return appointments for a client from TherapyPMS iOS API.
 
-    Mirrors the TherapyPMS pattern: data flows from TPMS → DCM on demand,
-    so appointments are always current without requiring a separate sync run.
+    Uses POST /api/v1/ios/appointment/recurring/list with:
+    - patient_ids: the selected client's TPMS patient id (`Client.external_id`)
+    - provider_ids: the logged-in user's TPMS provider id (`User.external_employee_id`)
     """
-    from apps.legacy.models import TpmsAppointment, TpmsActivityTemplate
-    from django.utils import timezone as tz
-
     client = _get_client_or_404(request, client_id)
 
     if not client.external_id:
         return _list_native_client_sessions(request, client, status, from_date, to_date)
 
-    external_client_id = int(client.external_id)
+    try:
+        tpms_patient_id = int(client.external_id)
+    except (TypeError, ValueError):
+        raise HttpError(400, 'Client is missing a valid TherapyPMS patient id')
 
-    qs = TpmsAppointment.objects.using('therapypms').filter(
-        client_id=external_client_id,
-    ).filter(
-        Q(is_break__isnull=True) | Q(is_break=1)
-    ).order_by('-schedule_date')
+    token = get_tpms_access_token(request.user.id)
+    if not token:
+        raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
 
-    # Staff see only their own appointments for this client
-    if request.user.role not in ('admin', 'supervisor'):
-        employee_id = request.user.external_employee_id
-        if not employee_id:
-            return []
-        qs = qs.filter(provider_id=employee_id)
-
-    if from_date:
-        qs = qs.filter(schedule_date__gte=from_date)
-    if to_date:
-        qs = qs.filter(schedule_date__lte=to_date)
-
-    appts = list(qs)
-
-    if not appts:
+    provider_ids: list[int] = []
+    if request.user.external_employee_id is not None:
+        provider_ids = [int(request.user.external_employee_id)]
+    elif request.user.role not in ('admin', 'supervisor'):
         return []
 
-    from apps.legacy.models import TpmsEmployee
-
-    # Batch-fetch activity template names + CPT codes
-    act_ids = {a.authorization_activity_id for a in appts if a.authorization_activity_id}
-    activity_map: dict[int, str] = {}
-    if act_ids:
-        for act in TpmsActivityTemplate.objects.using('therapypms').filter(id__in=act_ids):
-            activity_map[act.id] = act.activity_name or act.cpt_code or ''
-
-    # Batch-fetch provider names
-    provider_ids = {a.provider_id for a in appts if a.provider_id}
-    provider_map: dict[int, str] = {}
-    if provider_ids:
-        for emp in TpmsEmployee.objects.using('therapypms').filter(id__in=provider_ids):
-            provider_map[emp.id] = emp.full_name or f'{emp.first_name or ""} {emp.last_name or ""}'.strip() or ''
-
-    def _aware(dt):
-        if dt is None:
-            return None
-        return tz.make_aware(dt) if tz.is_naive(dt) else dt
-
-    # Merge in DCM appointment data (lesson_id, assigned_program_count, DCM id)
-    from apps.sessions.models import Appointment as DcmAppointment
-    from datetime import datetime as dt_cls
-    tpms_ext_ids = [str(a.id) for a in appts]
-    dcm_by_ext: dict[str, DcmAppointment] = {}
-    if tpms_ext_ids:
-        for dcm in (
-            DcmAppointment.objects
-            .filter(external_id__in=tpms_ext_ids)
-            .annotate(_program_count=Count('lesson__lesson_programs', distinct=True))
-        ):
-            dcm_by_ext[dcm.external_id] = dcm
-
-    results = []
-    for appt in appts:
-        # Skip soft-deleted / voided records from TPMS
-        if (appt.status or '').lower() in _TPMS_EXCLUDED_STATUSES:
-            continue
-        mapped_status = _tpms_status(appt.status)
-        if status and mapped_status != status:
-            continue
-
-        # Use from_time when set; fall back to midnight on schedule_date
-        if appt.from_time:
-            start = appt.from_time
-        elif appt.schedule_date:
-            start = dt_cls(appt.schedule_date.year, appt.schedule_date.month, appt.schedule_date.day)
-        else:
-            continue  # no usable time at all — skip
-
-        end = appt.to_time or start
-        service_name = (
-            activity_map.get(appt.authorization_activity_id)
-            or appt.activity_type
-            or appt.cpt_code
-            or ''
+    try:
+        appointments = list_recurring_appointments(
+            token,
+            patient_ids=[tpms_patient_id],
+            provider_ids=provider_ids,
         )
-        duration_mins = appt.time_duration
-        if not duration_mins and appt.from_time and appt.to_time:
-            delta = appt.to_time - appt.from_time
-            duration_mins = int(delta.total_seconds() / 60)
+    except TpmsAuthError as exc:
+        if exc.status_code in {401, 403}:
+            clear_tpms_access_token(request.user.id)
+            raise HttpError(401, 'TherapyPMS session expired. Please log in again.') from exc
+        raise HttpError(502, str(exc) or 'Failed to load appointments from TherapyPMS') from exc
 
-        dcm = dcm_by_ext.get(str(appt.id))
-        results.append({
-            'id':                    dcm.id if dcm else appt.id,
-            'client_id':             client_id,
-            'staff_id':              appt.provider_id,
-            'staff_name':            provider_map.get(appt.provider_id) if appt.provider_id else None,
-            'lesson_id':             dcm.lesson_id if dcm else None,
-            'assigned_program_count': dcm._program_count if dcm else 0,
-            'external_id':           str(appt.id),
-            'source':                'tpms',
-            'start_time':            _aware(start),
-            'end_time':              _aware(end),
-            'service_type':          service_name,
-            'location':              appt.location or None,
-            'duration_minutes':      duration_mins or 0,
-            'notes':                 appt.notes or '',
-            'status':                mapped_status,
-            'synced_at':             None,
-            'created_at':            _aware(appt.created_at) or _aware(start),
-        })
-
-    return results
+    return _serialize_tpms_api_appointments(
+        appointments=appointments,
+        dcm_client_id=client_id,
+        status=status,
+        from_date=from_date,
+        to_date=to_date,
+    )
