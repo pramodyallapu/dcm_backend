@@ -296,38 +296,56 @@ def _upsert_clients_from_patients(
         for c in Client.objects.filter(external_id__in=ext_ids)
     }
 
-    result: list[Client] = []
+    update_attrs = ('first_name', 'last_name', 'preferred_name', 'date_of_birth', 'status', 'external_admin_id')
+    to_create: list[Client] = []
+    to_update: list[Client] = []
+
+    from shared.tenancy import current_org_id_or_none
+
+    org_id = current_org_id_or_none()
+
     for fields in mapped:
         fields = {k: v for k, v in fields.items() if k != 'is_active'}
         ext_id = fields['external_id']
         dcm_client = existing.get(ext_id)
         if dcm_client is None:
-            dcm_client = Client.objects.create(**fields)
-            existing[ext_id] = dcm_client
+            client = Client(**fields)
+            if org_id is not None:
+                client.organization_id = org_id
+            to_create.append(client)
+            existing[ext_id] = client
         else:
-            update_fields = []
-            for attr in ('first_name', 'last_name', 'preferred_name', 'date_of_birth', 'status', 'external_admin_id'):
+            changed = False
+            for attr in update_attrs:
                 value = fields.get(attr)
                 if value is not None and getattr(dcm_client, attr) != value:
                     setattr(dcm_client, attr, value)
-                    update_fields.append(attr)
-            if update_fields:
-                dcm_client.save(update_fields=update_fields)
-        result.append(dcm_client)
+                    changed = True
+            if changed:
+                to_update.append(dcm_client)
+
+    if to_create:
+        Client.objects.bulk_create(to_create, batch_size=200)
+    if to_update:
+        Client.objects.bulk_update(to_update, list(update_attrs), batch_size=200)
+
+    # Prefer DB rows (with PKs) for the response when available.
+    persisted = {
+        c.external_id: c
+        for c in Client.objects.filter(external_id__in=ext_ids)
+    }
+    result = [persisted[ext_id] for ext_id in ext_ids if ext_id in persisted]
+    result.sort(key=lambda c: (c.last_name.lower(), c.first_name.lower()))
     return result
 
 
-@router.get('', response=list[ClientSchema])
-def list_clients(request, include_inactive: bool = False, search: str | None = None):
-    """
-    Returns patients scoped to the logged-in user's TherapyPMS session.
-
-    Uses GET /api/v1/ios/patient/list with the TPMS Bearer token captured at
-    login, then upserts DCM Client rows so programs/sessions keep a stable id.
-    """
-    if request.user.external_admin_id is None:
-        return _list_native_clients(request, include_inactive, search)
-
+def _sync_clients_from_tpms(
+    request,
+    *,
+    include_inactive: bool,
+    search: str | None,
+) -> list[Client]:
+    """Fetch TPMS patients for this session and upsert into DCM Client rows."""
     token = get_tpms_access_token(request.user.id)
     if not token:
         raise HttpError(401, 'TherapyPMS session expired. Please log in again.')
@@ -343,6 +361,24 @@ def list_clients(request, include_inactive: bool = False, search: str | None = N
     return _upsert_clients_from_patients(
         patients,
         fallback_admin_id=request.user.external_admin_id,
+        include_inactive=include_inactive,
+        search=search,
+    )
+
+
+@router.get('', response=list[ClientSchema])
+def list_clients(request, include_inactive: bool = False, search: str | None = None):
+    """
+    Returns patients scoped to the logged-in user's TherapyPMS session.
+
+    Uses GET /api/v1/ios/patient/list with the TPMS Bearer token captured at
+    login, then upserts DCM Client rows so programs/sessions keep a stable id.
+    """
+    if request.user.external_admin_id is None:
+        return _list_native_clients(request, include_inactive, search)
+
+    return _sync_clients_from_tpms(
+        request,
         include_inactive=include_inactive,
         search=search,
     )

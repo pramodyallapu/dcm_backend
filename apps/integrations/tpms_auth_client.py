@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_TPMS_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days fallback
+PATIENT_LIST_MAX_PAGES = 100
+PATIENT_LIST_MAX_WORKERS = 8
 
 
 class TpmsAuthError(Exception):
@@ -298,51 +300,79 @@ def _extract_rows(payload: dict[str, Any], *block_keys: str) -> list[dict[str, A
     return rows
 
 
+def _fetch_patient_list_page(
+    access_token: str,
+    page: int,
+    *,
+    search: str | None = None,
+) -> tuple[int, list[dict[str, Any]], int]:
+    """Fetch one patient-list page. Returns (page, rows, last_page)."""
+    params: dict[str, Any] = {'page': page}
+    if search:
+        params['search'] = search
+
+    payload = _request(
+        'GET',
+        '/api/v1/ios/patient/list',
+        access_token=access_token,
+        params=params,
+        debug_label=f'patient-list-page-{page}',
+    )
+
+    status = str(payload.get('status', '')).lower()
+    if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
+        message = payload.get('message') or 'Failed to load patients'
+        raise TpmsAuthError(str(message), payload=payload)
+
+    rows = _extract_rows(payload, 'patients')
+    block = payload.get('patients')
+    last_page = page
+    if isinstance(block, dict):
+        try:
+            last_page = int(block.get('last_page') or page)
+        except (TypeError, ValueError):
+            last_page = page
+
+    return page, rows, last_page
+
+
 def list_patients(access_token: str, *, search: str | None = None) -> list[dict[str, Any]]:
     """
     Fetch all pages from GET /api/v1/ios/patient/list using the TPMS Bearer token.
-    Returns the flattened list of patient dicts from `patients.data`.
+
+    Page 1 is fetched first to learn `last_page`, then remaining pages are
+    fetched in parallel so large practices load faster.
     """
-    patients: list[dict[str, Any]] = []
-    page = 1
-    last_page = 1
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    while page <= last_page:
-        params: dict[str, Any] = {'page': page}
-        if search:
-            params['search'] = search
-
-        payload = _request(
-            'GET',
-            '/api/v1/ios/patient/list',
-            access_token=access_token,
-            params=params,
-            debug_label=f'patient-list-page-{page}',
+    _, first_rows, last_page = _fetch_patient_list_page(access_token, 1, search=search)
+    if last_page > PATIENT_LIST_MAX_PAGES:
+        logger.warning(
+            'TPMS patient list pagination exceeded %s pages (last_page=%s); capping',
+            PATIENT_LIST_MAX_PAGES,
+            last_page,
         )
+    last_page = min(max(last_page, 1), PATIENT_LIST_MAX_PAGES)
 
-        status = str(payload.get('status', '')).lower()
-        if status in {'unauthorised', 'unauthorized', 'error', 'fail', 'failed'}:
-            message = payload.get('message') or 'Failed to load patients'
-            raise TpmsAuthError(str(message), payload=payload)
+    pages: dict[int, list[dict[str, Any]]] = {1: first_rows}
 
-        rows = _extract_rows(payload, 'patients')
-        block = payload.get('patients')
-        if isinstance(block, dict):
-            try:
-                last_page = int(block.get('last_page') or page)
-            except (TypeError, ValueError):
-                last_page = page
-        else:
-            last_page = page
+    remaining = list(range(2, last_page + 1))
+    if remaining:
+        workers = min(PATIENT_LIST_MAX_WORKERS, len(remaining))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_fetch_patient_list_page, access_token, page, search=search): page
+                for page in remaining
+            }
+            for future in as_completed(futures):
+                page, rows, _ = future.result()
+                pages[page] = rows
 
-        patients.extend(rows)
+    patients: list[dict[str, Any]] = []
+    for page in range(1, last_page + 1):
+        patients.extend(pages.get(page, []))
 
-        page += 1
-        if page > 100:
-            logger.warning('TPMS patient list pagination exceeded 100 pages; stopping')
-            break
-
-    print(f'[TPMS AUTH] patient list fetched count={len(patients)}')
+    print(f'[TPMS AUTH] patient list fetched count={len(patients)} pages={last_page}')
     return patients
 
 
