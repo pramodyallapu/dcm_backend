@@ -75,6 +75,9 @@ def dashboard(request):
     # Active clients
     active_clients = Client.objects.filter(status='active').count()
 
+    # Total clients (all statuses) — the admin dashboard's "Total clients" card
+    total_clients = Client.objects.count()
+
     # Unread notifications for this user
     unread_notifications = Notification.objects.filter(
         recipient_id=user.id, read_at__isnull=True
@@ -87,6 +90,7 @@ def dashboard(request):
         'sessions_pending_review': sessions_pending,
         'notes_pending_review': notes_pending,
         'active_clients': active_clients,
+        'total_clients': total_clients,
         'unread_notifications': unread_notifications,
         'sessions_today': sessions_today,
         'my_open_sessions': my_open_sessions,

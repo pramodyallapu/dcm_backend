@@ -46,32 +46,79 @@ def _get_session_or_404(session_id: int, request) -> SessionRun:
 
 
 def _build_trial_summary(session_run: SessionRun) -> list[TrialSummaryItem]:
-    from django.db.models import Sum, Q
+    """
+    Per-target trial summary for a single session. Scoped to one session_run,
+    so 1 grouped query + one score-breakdown query — fine for single-session
+    endpoints. list_sessions has its own batched version (_trial_summaries_for_sessions)
+    to avoid repeating this per session in a list.
+    """
     rows = (
         session_run.trial_events
-        .values('target_id', 'target_name')
-        .annotate(
-            total_trials=Count('id'),
-            # A trial is "correct" when it scores the maximum level (Independent)
-            # The threshold is determined by the snapshot's prompting template.
-            # For simplicity: score > 0 treated as correct at analytics level.
-            # Stage 5 analytics will do full mastery-template-aware scoring.
-        )
+        .values('target_id', 'target_name', 'response_score')
+        .annotate(count=Count('id'))
     )
-    result = []
+    by_target: dict[int, dict] = {}
     for row in rows:
-        trials = session_run.trial_events.filter(target_id=row['target_id'])
-        total = trials.count()
-        # Resolve max score from snapshot
-        max_score = _max_score_for_target(session_run.program_snapshot, row['target_id'])
-        correct = trials.filter(response_score=max_score).count() if max_score is not None else 0
+        t = by_target.setdefault(row['target_id'], {'target_name': row['target_name'], 'total': 0, 'score_counts': {}})
+        t['total'] += row['count']
+        t['score_counts'][row['response_score']] = t['score_counts'].get(row['response_score'], 0) + row['count']
+
+    result = []
+    for target_id, t in by_target.items():
+        max_score = _max_score_for_target(session_run.program_snapshot, target_id)
+        correct = t['score_counts'].get(max_score, 0) if max_score is not None else 0
+        total = t['total']
         result.append(TrialSummaryItem(
-            target_id=row['target_id'],
-            target_name=row['target_name'],
+            target_id=target_id,
+            target_name=t['target_name'],
             total_trials=total,
             correct_count=correct,
             pct_correct=round((correct / total * 100), 1) if total else 0.0,
         ))
+    return result
+
+
+def _trial_summaries_for_sessions(sessions: list[SessionRun]) -> dict[int, list[TrialSummaryItem]]:
+    """
+    Batched equivalent of _build_trial_summary for a list of sessions — one
+    query total instead of ~(1 + 2 * distinct targets) per session. Used by
+    list_sessions, which previously ran _build_trial_summary per row and
+    turned "load my sessions" into hundreds of queries once a staff member
+    had any meaningful session history.
+    """
+    session_ids = [s.id for s in sessions]
+    if not session_ids:
+        return {}
+
+    rows = (
+        TrialEvent.objects
+        .filter(session_run_id__in=session_ids)
+        .values('session_run_id', 'target_id', 'target_name', 'response_score')
+        .annotate(count=Count('id'))
+    )
+    by_session: dict[int, dict[int, dict]] = {}
+    for row in rows:
+        by_target = by_session.setdefault(row['session_run_id'], {})
+        t = by_target.setdefault(row['target_id'], {'target_name': row['target_name'], 'total': 0, 'score_counts': {}})
+        t['total'] += row['count']
+        t['score_counts'][row['response_score']] = t['score_counts'].get(row['response_score'], 0) + row['count']
+
+    result: dict[int, list[TrialSummaryItem]] = {}
+    for session in sessions:
+        by_target = by_session.get(session.id, {})
+        items = []
+        for target_id, t in by_target.items():
+            max_score = _max_score_for_target(session.program_snapshot, target_id)
+            correct = t['score_counts'].get(max_score, 0) if max_score is not None else 0
+            total = t['total']
+            items.append(TrialSummaryItem(
+                target_id=target_id,
+                target_name=t['target_name'],
+                total_trials=total,
+                correct_count=correct,
+                pct_correct=round((correct / total * 100), 1) if total else 0.0,
+            ))
+        result[session.id] = items
     return result
 
 
@@ -104,7 +151,19 @@ def _aware(dt):
     return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
 
 
-def _serialize_session(session: SessionRun, dcm_appt=None) -> dict:
+def _serialize_session(
+    session: SessionRun,
+    dcm_appt=None,
+    trial_summary: list[TrialSummaryItem] | None = None,
+    behavior_event_count: int | None = None,
+    abc_event_count: int | None = None,
+) -> dict:
+    """
+    trial_summary/behavior_event_count/abc_event_count can be precomputed and
+    passed in (see list_sessions) to avoid per-session queries when serializing
+    a batch. Single-session callers (get/create/submit/etc.) omit them and fall
+    back to the per-session queries below.
+    """
     staff = session.staff
     staff_name = f'{staff.first_name} {staff.last_name}'.strip() if staff else None
     if dcm_appt is None and session.external_appointment_id:
@@ -125,9 +184,9 @@ def _serialize_session(session: SessionRun, dcm_appt=None) -> dict:
         'reviewed_at': session.reviewed_at,
         'rejection_reason': session.rejection_reason,
         'program_snapshot': session.program_snapshot,
-        'trial_summary': _build_trial_summary(session),
-        'behavior_event_count': session.behavior_events.count(),
-        'abc_event_count': session.abc_events.count(),
+        'trial_summary': trial_summary if trial_summary is not None else _build_trial_summary(session),
+        'behavior_event_count': behavior_event_count if behavior_event_count is not None else session.behavior_events.count(),
+        'abc_event_count': abc_event_count if abc_event_count is not None else session.abc_events.count(),
         'created_at': session.created_at,
     }
 
@@ -495,7 +554,30 @@ def list_sessions(
                 dcm_appts[int(a.external_id)] = a
             except (TypeError, ValueError):
                 continue
-    return [_serialize_session(s, dcm_appts.get(s.external_appointment_id)) for s in sessions]
+
+    # behavior/abc counts each used to be computed per-row) — see
+    # _trial_summaries_for_sessions for why that mattered.
+    session_ids = [s.id for s in sessions]
+    trial_summaries = _trial_summaries_for_sessions(sessions)
+    behavior_counts = dict(
+        BehaviorEvent.objects.filter(session_run_id__in=session_ids)
+        .values('session_run_id').annotate(c=Count('id')).values_list('session_run_id', 'c')
+    )
+    abc_counts = dict(
+        ABCEvent.objects.filter(session_run_id__in=session_ids)
+        .values('session_run_id').annotate(c=Count('id')).values_list('session_run_id', 'c')
+    )
+
+    return [
+        _serialize_session(
+            s,
+            dcm_appts.get(s.external_appointment_id),
+            trial_summary=trial_summaries.get(s.id, []),
+            behavior_event_count=behavior_counts.get(s.id, 0),
+            abc_event_count=abc_counts.get(s.id, 0),
+        )
+        for s in sessions
+    ]
 
 
 @router.get('/sessions/{session_id}', response=SessionRunSchema)
