@@ -164,6 +164,7 @@ class BehaviorEventSchema(Schema):
     frequency_count: int
     severity: str
     notes: str
+    client_event_id: str | None = None
 
 
 class BehaviorEventCreateRequest(Schema):
@@ -174,6 +175,7 @@ class BehaviorEventCreateRequest(Schema):
     frequency_count: int = 1
     severity: str = ''
     notes: str = ''
+    client_event_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +192,7 @@ class ABCEventSchema(Schema):
     setting: str
     staff_response: str
     notes: str
+    client_event_id: str | None = None
 
 
 class ABCEventCreateRequest(Schema):
@@ -200,6 +203,7 @@ class ABCEventCreateRequest(Schema):
     setting: str = ''
     staff_response: str = ''
     notes: str = ''
+    client_event_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -184,6 +184,7 @@ class BehaviorEvent(OrganizationScopedMixin):
     frequency_count = models.PositiveIntegerField(default=1)
     severity = models.CharField(max_length=10, choices=Severity.choices, blank=True)
     notes = models.TextField(blank=True)
+    client_event_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
 
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id
@@ -191,6 +192,13 @@ class BehaviorEvent(OrganizationScopedMixin):
     class Meta:
         app_label = 'dcm_sessions'
         ordering = ['occurred_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['session_run', 'client_event_id'],
+                condition=models.Q(client_event_id__isnull=False),
+                name='unique_behaviorevent_session_client_event_id',
+            ),
+        ]
 
     def __str__(self) -> str:
         return f'Behavior {self.target_name} @ {self.occurred_at:%H:%M}'
@@ -210,6 +218,8 @@ class ABCEvent(OrganizationScopedMixin):
     setting = models.CharField(max_length=200, blank=True)
     staff_response = models.TextField(blank=True)
     notes = models.TextField(blank=True)
+    # See BehaviorEvent.client_event_id — same crash-window dedup purpose.
+    client_event_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
 
     def _derive_organization_id(self) -> int | None:
         return self.session_run.organization_id
@@ -217,6 +227,13 @@ class ABCEvent(OrganizationScopedMixin):
     class Meta:
         app_label = 'dcm_sessions'
         ordering = ['occurred_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['session_run', 'client_event_id'],
+                condition=models.Q(client_event_id__isnull=False),
+                name='unique_abcevent_session_client_event_id',
+            ),
+        ]
 
     def __str__(self) -> str:
         return f'ABC @ {self.occurred_at:%H:%M} — {self.behavior_description[:40]}'

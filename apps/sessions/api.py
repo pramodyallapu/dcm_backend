@@ -631,6 +631,27 @@ def delete_trial(request, session_id: int, trial_id: int):
 # Behavior events
 # ---------------------------------------------------------------------------
 
+def _get_or_create_behavior(session_id: int, data: BehaviorEventCreateRequest) -> tuple[BehaviorEvent, bool]:
+    """
+    Upserts on (session, client_event_id) when the mobile offline queue sends
+    one — closes the crash window where a sync call reaches the server but
+    the app dies before the local row can be flagged synced, which would
+    otherwise resend and duplicate on retry (unlike trials, behavior events
+    have no natural (target, trial_number) key to dedupe on). Falls back to
+    a plain create when no client_event_id is sent (e.g. from the web app,
+    which has no offline queue and nothing to dedupe against).
+    """
+    payload = data.dict()
+    client_event_id = payload.pop('client_event_id', None)
+    if client_event_id:
+        return BehaviorEvent.objects.get_or_create(
+            session_run_id=session_id,
+            client_event_id=client_event_id,
+            defaults=payload,
+        )
+    return BehaviorEvent.objects.create(session_run_id=session_id, **payload), True
+
+
 @router.get('/sessions/{session_id}/behaviors', response=list[BehaviorEventSchema])
 def list_behaviors(request, session_id: int):
     _get_session_or_404(session_id, request)
@@ -642,7 +663,7 @@ def add_behavior(request, session_id: int, data: BehaviorEventCreateRequest):
     session = _get_session_or_404(session_id, request)
     if not session.is_editable:
         raise HttpError(409, f'Session is {session.status} — cannot add behavior events')
-    event = BehaviorEvent.objects.create(session_run_id=session_id, **data.dict())
+    event, _ = _get_or_create_behavior(session_id, data)
     return 201, event
 
 
@@ -662,6 +683,21 @@ def delete_behavior(request, session_id: int, event_id: int):
 # ABC events
 # ---------------------------------------------------------------------------
 
+def _get_or_create_abc(session_id: int, data: ABCEventCreateRequest) -> tuple[ABCEvent, bool]:
+    """Same crash-window dedup purpose as _get_or_create_behavior — this is
+    the endpoint that matters most for it, since ABC events sync through
+    this individual endpoint rather than the batch /sync one."""
+    payload = data.dict()
+    client_event_id = payload.pop('client_event_id', None)
+    if client_event_id:
+        return ABCEvent.objects.get_or_create(
+            session_run_id=session_id,
+            client_event_id=client_event_id,
+            defaults=payload,
+        )
+    return ABCEvent.objects.create(session_run_id=session_id, **payload), True
+
+
 @router.get('/sessions/{session_id}/abc', response=list[ABCEventSchema])
 def list_abc(request, session_id: int):
     _get_session_or_404(session_id, request)
@@ -673,7 +709,7 @@ def add_abc(request, session_id: int, data: ABCEventCreateRequest):
     session = _get_session_or_404(session_id, request)
     if not session.is_editable:
         raise HttpError(409, f'Session is {session.status} — cannot add ABC events')
-    event = ABCEvent.objects.create(session_run_id=session_id, **data.dict())
+    event, _ = _get_or_create_abc(session_id, data)
     return 201, event
 
 
@@ -740,8 +776,10 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
     Idempotent batch endpoint for the mobile offline workflow.
 
     Mobile stores all events in local SQLite during an offline session, then
-    calls this endpoint once back online. Duplicate trial entries (same session +
-    target_id + trial_number) are skipped — safe to call multiple times.
+    calls this endpoint once back online. Safe to call multiple times:
+    trials dedupe on (session, target_id, trial_number, sub_item_key);
+    behaviors/abc dedupe on (session, client_event_id) when the mobile queue
+    sends one — see _get_or_create_behavior/_get_or_create_abc.
     """
     session = _get_session_or_404(session_id, request)
     if not session.is_editable:
@@ -771,13 +809,15 @@ def sync_session(request, session_id: int, data: SessionSyncPayload):
 
     behaviors_created = 0
     for b in data.behaviors:
-        event = BehaviorEvent.objects.create(session_run_id=session_id, **b.dict())
-        behaviors_created += 1
+        _, created = _get_or_create_behavior(session_id, b)
+        if created:
+            behaviors_created += 1
 
     abc_created = 0
     for a in data.abc:
-        event = ABCEvent.objects.create(session_run_id=session_id, **a.dict())
-        abc_created += 1
+        _, created = _get_or_create_abc(session_id, a)
+        if created:
+            abc_created += 1
 
     submitted = False
     if data.submit_after_sync:
