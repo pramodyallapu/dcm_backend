@@ -151,7 +151,7 @@ class TargetSummarySchema(Schema):
 
 class ProgramSchema(Schema):
     id: int
-    client_id: int
+    client_id: int | None = None
     name: str
     category: str
     status: str
