@@ -62,6 +62,8 @@ def build_program_snapshot(client_id: int, lesson_id: int | None = None, restric
                     'name': pt.name,
                     'levels': pt.levels,
                 } if pt else None,
+                'current_prompt_level_index': target.current_prompt_level_index,
+                'fading_mode': target.fading_mode,
             })
 
         snapshot['programs'].append({
