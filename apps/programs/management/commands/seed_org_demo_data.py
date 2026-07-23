@@ -178,7 +178,7 @@ class Command(BaseCommand):
     def _seed(self, org: Organization, clear: bool):
         from apps.clients.models import Client
         from apps.programs.models import (
-            MasteryTemplate, PromptingTemplate, Program, ProgramDataField,
+            PromptingTemplate, Program, ProgramDataField,
             ProgramTag, Target, TargetStatus, TreatmentArea, WorkflowTemplate,
         )
 
@@ -207,7 +207,7 @@ class Command(BaseCommand):
         for field_data in DATA_FIELDS:
             ProgramDataField.objects.get_or_create(name=field_data['name'], defaults=field_data)
 
-        # ── Settings: prompting + mastery templates ─────────────────────────
+        # ── Settings: prompting templates ───────────────────────────────────
         prompt_tpl, _ = PromptingTemplate.objects.get_or_create(
             name='Standard Prompt Hierarchy',
             defaults={
@@ -222,15 +222,6 @@ class Command(BaseCommand):
                 'is_org_default': True,
             },
         )
-        MasteryTemplate.objects.get_or_create(
-            name='Standard Mastery Criteria',
-            defaults={
-                'description': '80% accuracy across 3 consecutive sessions, minimum 5 trials',
-                'rules': {'consecutive_sessions': 3, 'threshold_pct': 80, 'minimum_trials': 5},
-                'is_org_default': True,
-            },
-        )
-
         # ── Settings: workflow templates ────────────────────────────────────
         workflow_objects = {}
         for wf_data in WORKFLOWS:

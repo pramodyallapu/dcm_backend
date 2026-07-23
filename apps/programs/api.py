@@ -5,7 +5,7 @@ from django.utils import timezone
 from apps.accounts.auth import jwt_auth
 from apps.accounts.permissions import require_permission
 from .models import (
-    Program, Target, PromptingTemplate, MasteryTemplate,
+    Program, Target, PromptingTemplate,
     WorkflowTemplate, MaintenanceSchedule, FadingTemplate,
     Lesson, LessonProgram,
     TreatmentArea, ProgramTag, ProgramDataField, TargetStatus,
@@ -16,7 +16,6 @@ from .schemas import (
     TargetSchema, TargetCreateRequest, TargetUpdateRequest,
     BulkUpdateTargetsRequest, BulkUpdateResult, ReorderTargetsRequest,
     PromptingTemplateSchema, PromptingTemplateCreateRequest, PromptingTemplateUpdateRequest,
-    MasteryTemplateSchema, MasteryTemplateCreateRequest, MasteryTemplateUpdateRequest,
     WorkflowTemplateSchema, WorkflowTemplateCreateRequest, WorkflowTemplateUpdateRequest,
     MaintenanceScheduleSchema, MaintenanceScheduleCreateRequest, MaintenanceScheduleUpdateRequest,
     FadingTemplateSchema, FadingTemplateCreateRequest, FadingTemplateUpdateRequest,
@@ -302,7 +301,6 @@ def target_prompt_level_history(request, target_id: int):
 # are enumerable) would otherwise be written with no check at all.
 _BULK_UPDATE_FK_MODELS = {
     'prompting_template_id': PromptingTemplate,
-    'mastery_template_id': MasteryTemplate,
     'workflow_template_id': WorkflowTemplate,
     'maintenance_schedule_id': MaintenanceSchedule,
     'fading_template_id': FadingTemplate,
@@ -378,45 +376,6 @@ def delete_prompting_template(request, template_id: int):
     try:
         PromptingTemplate.objects.get(id=template_id).delete()
     except PromptingTemplate.DoesNotExist:
-        raise HttpError(404, 'Template not found')
-    return 204, None
-
-
-# ---------------------------------------------------------------------------
-# Mastery templates
-# ---------------------------------------------------------------------------
-
-@router.get('/programs/templates/mastery', response=list[MasteryTemplateSchema])
-def list_mastery_templates(request):
-    return list(MasteryTemplate.objects.all())
-
-
-@router.post('/programs/templates/mastery', response={201: MasteryTemplateSchema})
-def create_mastery_template(request, data: MasteryTemplateCreateRequest):
-    _require_settings_permission(request, 'settings_mastery_templates_create')
-    template = MasteryTemplate.objects.create(created_by=request.user, **data.dict())
-    return 201, template
-
-
-@router.patch('/programs/templates/mastery/{template_id}', response=MasteryTemplateSchema)
-def update_mastery_template(request, template_id: int, data: MasteryTemplateUpdateRequest):
-    _require_settings_permission(request, 'settings_mastery_templates_edit')
-    try:
-        template = MasteryTemplate.objects.get(id=template_id)
-    except MasteryTemplate.DoesNotExist:
-        raise HttpError(404, 'Template not found')
-    for field, value in data.dict(exclude_none=True).items():
-        setattr(template, field, value)
-    template.save()
-    return template
-
-
-@router.delete('/programs/templates/mastery/{template_id}', response={204: None})
-def delete_mastery_template(request, template_id: int):
-    _require_settings_permission(request, 'settings_mastery_templates_delete')
-    try:
-        MasteryTemplate.objects.get(id=template_id).delete()
-    except MasteryTemplate.DoesNotExist:
         raise HttpError(404, 'Template not found')
     return 204, None
 
@@ -777,7 +736,6 @@ def _copy_program_to_client(source: Program, client_id: int, user) -> Program:
             name=t.name,
             measurement_type=t.measurement_type,
             prompting_template=t.prompting_template,
-            mastery_template=t.mastery_template,
             sd_text=t.sd_text,
             teaching_instructions=t.teaching_instructions,
             status=t.status,

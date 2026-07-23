@@ -21,24 +21,6 @@ class PromptingTemplate(TenantAwareModel):
         return self.name
 
 
-class MasteryTemplate(TenantAwareModel):
-    """
-    Defines phase-advancement rules applied to targets.
-    Example rules: {"consecutive_sessions": 3, "threshold_pct": 80, "minimum_trials": 5}
-    """
-    name = models.CharField(max_length=200)
-    description = models.TextField(blank=True)
-    rules = models.JSONField(default=dict)
-    is_org_default = models.BooleanField(default=False)
-
-    class Meta:
-        app_label = 'programs'
-        ordering = ['name']
-
-    def __str__(self) -> str:
-        return self.name
-
-
 class FadingTemplate(TenantAwareModel):
     """
     Defines prompt-fading advancement/regression rules applied to a target's
@@ -195,13 +177,6 @@ class Target(TenantAwareModel):
         blank=True,
         related_name='targets',
     )
-    mastery_template = models.ForeignKey(
-        MasteryTemplate,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='targets',
-    )
     workflow_template = models.ForeignKey(
         'WorkflowTemplate',
         on_delete=models.SET_NULL,
@@ -239,7 +214,7 @@ class Target(TenantAwareModel):
     # rely on the ambient tenant context (which could theoretically be
     # wrong if this is ever created from a background job).
     _org_scoped_fk_fields = (
-        'prompting_template', 'mastery_template', 'workflow_template',
+        'prompting_template', 'workflow_template',
         'maintenance_schedule', 'fading_template',
     )
 

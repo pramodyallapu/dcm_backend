@@ -111,33 +111,6 @@ class PromptingTemplateUpdateRequest(Schema):
 
 
 # ---------------------------------------------------------------------------
-# Mastery templates
-# ---------------------------------------------------------------------------
-
-class MasteryTemplateSchema(Schema):
-    id: int
-    name: str
-    description: str
-    rules: dict[str, Any]
-    is_org_default: bool
-    created_at: datetime
-
-
-class MasteryTemplateCreateRequest(Schema):
-    name: str
-    description: str = ''
-    rules: dict[str, Any]
-    is_org_default: bool = False
-
-
-class MasteryTemplateUpdateRequest(Schema):
-    name: str | None = None
-    description: str | None = None
-    rules: dict[str, Any] | None = None
-    is_org_default: bool | None = None
-
-
-# ---------------------------------------------------------------------------
 # Fading templates
 # ---------------------------------------------------------------------------
 
@@ -260,7 +233,6 @@ class TargetSchema(Schema):
     measurement_type: str
     sub_items: list[dict] = []
     prompting_template_id: int | None
-    mastery_template_id: int | None
     workflow_template_id: int | None
     maintenance_schedule_id: int | None
     fading_template_id: int | None
@@ -282,7 +254,6 @@ class TargetCreateRequest(Schema):
     measurement_type: str = 'discrete_trial'
     sub_items: list[dict] = []
     prompting_template_id: int | None = None
-    mastery_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -298,7 +269,6 @@ class TargetUpdateRequest(Schema):
     measurement_type: str | None = None
     sub_items: list[dict] | None = None
     prompting_template_id: int | None = None
-    mastery_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
@@ -324,7 +294,6 @@ class BulkUpdateTargetsRequest(Schema):
     sd_text: str | None = None
     teaching_instructions: str | None = None
     prompting_template_id: int | None = None
-    mastery_template_id: int | None = None
     workflow_template_id: int | None = None
     maintenance_schedule_id: int | None = None
     fading_template_id: int | None = None
